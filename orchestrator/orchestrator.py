@@ -318,5 +318,23 @@ if __name__ == "__main__":
         sys.exit(0)
 
     import uvicorn
-    print("[ORCHESTRATOR] Starting on port 8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")  # nosec B104
+
+    from orchestrator.certs import ensure_certs, is_https_enabled
+
+    uvicorn_kwargs: dict[str, Any] = {
+        "host": "0.0.0.0",  # nosec B104
+        "port": 8000,
+        "log_level": "info",
+    }
+
+    if is_https_enabled():
+        cert_path, key_path = ensure_certs()
+        uvicorn_kwargs["ssl_certfile"] = str(cert_path)
+        uvicorn_kwargs["ssl_keyfile"] = str(key_path)
+        print("[ORCHESTRATOR] Starting on port 8000 (HTTPS)")
+        print(f"  cert: {cert_path}")
+        print(f"  key:  {key_path}")
+    else:
+        print("[ORCHESTRATOR] Starting on port 8000")
+
+    uvicorn.run(app, **uvicorn_kwargs)

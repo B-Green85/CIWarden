@@ -1,6 +1,8 @@
 # Runtime data
 .cdmad/
 .gate_pids.json
+orchestrator/certs/
+.env
 
 # Python
 __pycache__/

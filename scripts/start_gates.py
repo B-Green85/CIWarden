@@ -13,12 +13,49 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PID_FILE = os.path.join(ROOT, ".gate_pids.json")
+ENV_FILE = os.path.join(ROOT, ".env")
 
 sys.path.insert(0, ROOT)
 from gates.gates import GATE_REGISTRY  # noqa: E402
 
 
+def load_env(path: str | None = None) -> dict[str, str]:
+    """Load variables from a .env file into os.environ.
+
+    Returns the dict of variables that were loaded.
+    Skips blank lines, comments (#), and lines without '='.
+    Values may be optionally quoted with single or double quotes.
+    """
+    env_path = path or ENV_FILE
+    loaded: dict[str, str] = {}
+
+    if not os.path.isfile(env_path):
+        return loaded
+
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            # Strip matching quotes
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            os.environ[key] = value
+            loaded[key] = value
+
+    return loaded
+
+
 def start_all() -> None:
+    loaded = load_env()
+    if loaded:
+        print(f"\n[ENV] Loaded {len(loaded)} variable(s) from .env")
+
     pids: dict[str, int] = {}
     print("\n[CI GATE WRAPPER] Starting all services...\n")
 

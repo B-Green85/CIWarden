@@ -13,8 +13,12 @@ except ImportError:
     print("[CI GATE] httpx not installed — run: pip install httpx")
     sys.exit(1)
 
-ORCHESTRATOR_URL = "http://localhost:8000/commit"
 AGENT_ID = "local-dev"  # override with env var CI_AGENT_ID
+
+
+def _orchestrator_url() -> str:
+    scheme = "https" if os.environ.get("CDMAD_HTTPS", "0") == "1" else "http"
+    return f"{scheme}://localhost:8000/commit"
 
 def get_current_sha() -> str:
     try:
@@ -56,12 +60,15 @@ def main() -> None:
         # Local dev bypass — tell orchestrator to skip auth
         os.environ["CDMAD_LOCAL_DEV"] = "1"
 
+    url = _orchestrator_url()
+    verify_ssl = os.environ.get("CDMAD_HTTPS_VERIFY", "1") != "0"
+
     try:
-        response = httpx.post(ORCHESTRATOR_URL, json={
+        response = httpx.post(url, json={
             "agent_id": agent_id,
             "branch": branch,
             "commit_sha": sha
-        }, headers=headers, timeout=300)
+        }, headers=headers, timeout=300, verify=verify_ssl)
 
         data = response.json()
 
