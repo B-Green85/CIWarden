@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import sqlite3
 import sys
@@ -17,13 +18,47 @@ import time
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
+from starlette.responses import Response
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from gates.gates import GATE_REGISTRY  # noqa: E402
+from orchestrator.auth import (  # noqa: E402
+    ensure_master_key,
+    init_auth_db,
+    is_local_dev_mode,
+    validate_key,
+)
 
-app = FastAPI(title="CI Gate Orchestrator", version="1.0.0")
+app = FastAPI(title="CI Gate Orchestrator", version="1.1.0")
+
+# ── Auth setup ────────────────────────────────────────────────
+init_auth_db()
+_startup_key = ensure_master_key()
+if _startup_key:
+    print(f"[AUTH] Master API key generated: {_startup_key}")
+    print("[AUTH] Store this key — it will not be shown again.")
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next: Any) -> Any:
+    """Require X-Gate-Token header on POST /commit unless in local dev mode."""
+    if request.method == "POST" and request.url.path == "/commit" and not is_local_dev_mode():
+        token = request.headers.get("X-Gate-Token")
+        if not token:
+            return _json_response(401, {"detail": "Missing X-Gate-Token header"})
+        if not validate_key(token):
+            return _json_response(401, {"detail": "Invalid API key"})
+    return await call_next(request)
+
+
+def _json_response(status_code: int, content: dict[str, Any]) -> Any:
+    return Response(
+        content=json.dumps(content),
+        status_code=status_code,
+        media_type="application/json",
+    )
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "gate_results.db")
 
@@ -276,6 +311,12 @@ async def verify_token(token: str) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
+    if "--generate-key" in sys.argv:
+        from orchestrator.auth import generate_api_key
+        key = generate_api_key("cli-generated")
+        print(f"New API key: {key}")
+        sys.exit(0)
+
     import uvicorn
     print("[ORCHESTRATOR] Starting on port 8000")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")  # nosec B104

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import time
 from pathlib import Path
@@ -45,6 +47,18 @@ def _discover_source_files(root: str = ".") -> dict[str, str]:
     return result
 
 
+def _compute_source_sha(source_files: dict[str, str]) -> str:
+    """Compute a deterministic SHA256 over sorted source file contents."""
+    h = hashlib.sha256()
+    for key in sorted(source_files):
+        h.update(key.encode())
+        h.update(source_files[key].encode())
+    return h.hexdigest()
+
+
+_CACHE_FILENAME = "memory_cache.json"
+
+
 class MemoryGate:
     def __init__(
         self,
@@ -72,13 +86,36 @@ class MemoryGate:
                 duration_ms=duration,
             )
 
+    @property
+    def _cache_enabled(self) -> bool:
+        return os.environ.get("CDMAD_MEMORY_CACHE") == "1"
+
+    def _cache_path(self) -> Path | None:
+        """Return cache file path if store has a file-based root."""
+        root = getattr(self.store, "root", None)
+        if root is None:
+            return None
+        return Path(root) / _CACHE_FILENAME
+
+    def _read_cached_sha(self) -> str | None:
+        path = self._cache_path()
+        if path is None or not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+            val = data.get("source_sha")
+            return str(val) if val is not None else None
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def _write_cache(self, source_sha: str) -> None:
+        path = self._cache_path()
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"source_sha": source_sha}))
+
     async def _execute(self, source_files: dict[str, str] | None, start: float) -> GateResult:
-        session = self.store.get_or_create_session()
-        session = self.store.advance_session(session)
-
-        gen_id = session.current_generation_id
-        seq = session.current_sequence
-
         if source_files is None:
             source_files = _discover_source_files()
 
@@ -91,6 +128,26 @@ class MemoryGate:
                 exit_code=0,
                 duration_ms=duration,
             )
+
+        # Cache check: skip LLM extraction if source files are unchanged since last pass
+        source_sha = _compute_source_sha(source_files)
+        if self._cache_enabled:
+            cached_sha = self._read_cached_sha()
+            if cached_sha == source_sha:
+                duration = int((time.time() - start) * 1000)
+                return GateResult(
+                    gate="memory",
+                    status=GateStatus.PASS,
+                    output=f"Memory Gate [CACHED] — source unchanged (sha={source_sha[:12]})",
+                    exit_code=0,
+                    duration_ms=duration,
+                )
+
+        session = self.store.get_or_create_session()
+        session = self.store.advance_session(session)
+
+        gen_id = session.current_generation_id
+        seq = session.current_sequence
 
         all_summaries: list[ContractSummary] = []
         all_drifts: list[DriftResult] = []
@@ -133,6 +190,9 @@ class MemoryGate:
 
         header = "PASS" if passed else f"BLOCKED — max drift {max_drift:.4f} >= {self.threshold}"
         output = f"Memory Gate [{header}] (gen={gen_id}, seq={seq})\n" + "\n".join(output_lines)
+
+        if passed and self._cache_enabled:
+            self._write_cache(source_sha)
 
         return GateResult(
             gate="memory",
