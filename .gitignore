@@ -11,9 +11,16 @@ __pycache__/
 .venv/
 *.egg-info/
 
+# Rust
+sentinel/target/
+
 # Tools
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/
 htmlcov/
 .coverage
+target/
+Cargo.lock
+sentinel/
+sentinel_py/

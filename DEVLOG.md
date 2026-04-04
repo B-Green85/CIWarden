@@ -122,3 +122,94 @@ Commit SHA:  7940496
 ---
 
 *"Generation is optional. Verification is not."*
+
+---
+
+## March 5, 2026 — v1.1: Better Plumbing
+
+**The system shipped faster because the agent autonomously navigated the gate chain — fixing, retrying, and landing the commit without me in the loop.**
+
+Yesterday CI Wrapper governed its own birth in 88 minutes and 24 commit attempts, while I relayed gate output to model by hand. Today the system shipped three features in 23 minutes, and the last commit passed all 7 gates on the first try.
+
+---
+
+### What Was Built
+
+Three commits landed on the `v1.1` branch:
+
+1. **Enterprise auth layer** — API key authentication on `POST /commit` via `X-Gate-Token` header, SHA-256 key hashing in `orchestrator/auth.db`, master key auto-generated on first startup, local dev bypass when `CDMAD_GATE_TOKEN` unset
+
+2. **HTTPS support** — Self-signed certificate generation on first startup via `cryptography` library, uvicorn SSL when `CDMAD_HTTPS=1`, `CDMAD_HTTPS_VERIFY=0` for self-signed cert bypass in the pre-commit hook, SAN includes `localhost` + `127.0.0.1`, private key locked to `0600`
+
+3. **.env config** — `start_gates.py` auto-loads `.env` on startup, injects variables into the environment before spawning any gate services, `.env.example` template with all config vars
+
+Supporting changes: 25 new tests, import sort fixes, mypy strict compliance, mocked gate calls in auth tests to prevent infinite pytest recursion.
+
+---
+
+### The Commit Record
+
+| Commit | Message | Attempts | Gate Result |
+|--------|---------|----------|-------------|
+| `dcc8b10` | feat: v1.1 — enterprise auth layer and dev loop | 5 | ALL PASS |
+| `a05f6e7` | feat: v1.1 — HTTPS support and .env config | 1 | ALL PASS |
+
+---
+
+### v1.0.0 vs v1.1 — Session Comparison
+
+| Metric | v1.0.0 (March 4) | v1.1 (March 5) |
+|--------|-------------------|----------------|
+| **Commits landed** | 1 | 2 |
+| **Total attempts** | 24 | 6 |
+| **Wall clock time** | 88 minutes | ~23 minutes |
+| **Human relay** | Manual copy-paste between gate output and fixes | Claude Code independently resolved blockers in the validation chain |
+| **API key management** | Set manually in terminal before starting services | Lives in `.env` |
+| **Gate service lifecycle** | Managed manually across multiple terminals | Managed by Claude Code via `start_gates.py` |
+| **Environment config** | Ad-hoc `export` commands, lost between sessions | `.env` file loaded automatically on startup |
+| **Final commit retries** | 1 (attempt 24 of 24) | 0 (first attempt pass) |
+
+---
+
+### What Changed
+
+**`dev_loop.sh` closes the human-as-message-bus gap.** In v1.0.0, I read gate output, pasted it to model, waited for fixes, re-ran the commit, and repeated. The dev loop automates this: `git commit` → gate failure → pipe output to `claude -p` → fix → retry. I become the initiator, not the relay.
+
+(The dev loop couldn't run inside Claude Code due to nested session restrictions — Claude Code ran the loop manually instead. But the script exists for standalone use.)
+
+**`.env` removes key management friction.** In v1.0.0, the Anthropic API key was set manually in the terminal before starting services and had to be re-provided when services restarted. In v1.1, `start_gates.py` reads `.env` before spawning any process. The key is set once and persists across restarts.
+
+**Auth tests exposed a recursive pytest hang.** Two auth middleware tests called `POST /commit` through FastAPI's `TestClient`, which triggered the orchestrator to call all gate services via httpx. The test gate ran `pytest`, which ran the auth tests, which called `POST /commit` — infinite recursion. Fixed by mocking `call_gate` in auth tests. This was the session's most instructive bug: the gate chain's enforcement model means you can't casually invoke it from inside a test without mocking the boundary.
+
+---
+
+### The Throughput Story
+
+The throughput improvement came from two things: the dev loop removing the relay, and `.env` removing the key management friction. The system got faster because I stopped doing work that didn't require my judgment.
+
+The constraints were mine. The gate chain was my design. The merge token is mine to issue. Claude Code handled execution — but every boundary it operated within was set deliberately by me. That's not automation replacing oversight. That's oversight getting better infrastructure.
+
+v1.0.0 was me doing everything. v1.1 was me doing only what required me.
+
+---
+
+### Final Gate Run
+
+```
+✓  lint         PASS      68ms
+✓  typecheck    PASS     902ms
+✓  security     PASS     559ms
+✓  memory       PASS   84827ms
+✓  test         PASS    9599ms
+✓  stress       PASS      59ms
+✓  build        PASS     139ms
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Total               94702ms
+
+✦  ALL GATES PASSED
+   Merge token: e65e65b28f1a12e5f4b961bb
+```
+
+---
+
+*"Generation is optional. Verification is not."*
