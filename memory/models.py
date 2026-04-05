@@ -14,6 +14,7 @@ class ContractType(StrEnum):
     CLASS = "class"
     MODULE = "module"
     DEPENDENCY = "dependency"
+    ENUM = "enum"
 
 
 class ContractEntry(BaseModel):

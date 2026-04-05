@@ -24,7 +24,7 @@ Return ONLY a valid JSON object (no markdown fencing, no explanation) with this 
   "sequence": <sequence number — provided in the user message>,
   "contracts": [
     {
-      "type": "interface" | "function" | "class" | "module" | "dependency",
+      "type": "interface" | "function" | "class" | "module" | "dependency" | "enum",
       "name": "<name of the contract>",
       "fields": ["<field names if applicable>"],
       "consumed_by": ["<names of consumers if known>"],
@@ -36,7 +36,7 @@ Return ONLY a valid JSON object (no markdown fencing, no explanation) with this 
   "exposes": ["<public interfaces, functions, or types this code exports>"]
 }
 
-Extract ALL contracts: classes, functions, interfaces, type aliases, and module-level \
+Extract ALL contracts: classes, functions, interfaces, enums, type aliases, and module-level \
 dependencies. Include implicit assumptions about units, formats, coordinate systems, etc.\
 """
 
