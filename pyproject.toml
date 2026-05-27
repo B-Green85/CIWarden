@@ -1,7 +1,7 @@
 [project]
 name = "ci-gate-wrapper"
 version = "0.1.0"
-description = "CDMAD enforcement layer — CI gate chain for agentic development"
+description = "CDMAE enforcement layer — CI gate chain for agentic development"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110.0",

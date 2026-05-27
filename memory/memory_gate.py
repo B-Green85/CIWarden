@@ -68,7 +68,7 @@ class MemoryGate:
     ) -> None:
         self.llm = llm_client
         self.store = store
-        env_override = os.environ.get("CDMAD_DRIFT_THRESHOLD")
+        env_override = os.environ.get("CDMAE_DRIFT_THRESHOLD")
         self.threshold = float(env_override) if env_override else drift_threshold
 
     async def run(self, source_files: dict[str, str] | None = None) -> GateResult:
@@ -88,7 +88,7 @@ class MemoryGate:
 
     @property
     def _cache_enabled(self) -> bool:
-        return os.environ.get("CDMAD_MEMORY_CACHE") == "1"
+        return os.environ.get("CDMAE_MEMORY_CACHE") == "1"
 
     def _cache_path(self) -> Path | None:
         """Return cache file path if store has a file-based root."""

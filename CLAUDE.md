@@ -2,7 +2,7 @@
 
 ## What This Project Is
 
-CDMAD (Constraint Driven Model Assisted Development) enforcement layer. A gate chain that sits between code generation and merge. Every commit must pass lint, typecheck, security, test, and build gates. No merge token = no merge.
+CDMAE (Constraint Driven Machine Assisted Engineering) enforcement layer. A gate chain that sits between code generation and merge. Every commit must pass lint, typecheck, security, test, and build gates. No merge token = no merge.
 
 ## Architecture
 
@@ -46,7 +46,7 @@ python scripts/start_gates.py --stop
 - **No hardcoded secrets**, no `eval()`, no `shell=True` in subprocess
 - Config lives in `pyproject.toml` (ruff, mypy, pytest, bandit)
 
-## CDMAD Rules
+## CDMAE Rules
 
 1. Never self-certify code as correct — the gate chain is the sole verification authority
 2. Declare assumptions before generating non-trivial code

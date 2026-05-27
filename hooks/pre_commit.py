@@ -17,7 +17,7 @@ AGENT_ID = "local-dev"  # override with env var CI_AGENT_ID
 
 
 def _orchestrator_url() -> str:
-    scheme = "https" if os.environ.get("CDMAD_HTTPS", "0") == "1" else "http"
+    scheme = "https" if os.environ.get("CDMAE_HTTPS", "0") == "1" else "http"
     return f"{scheme}://localhost:8000/commit"
 
 def get_current_sha() -> str:
@@ -45,7 +45,7 @@ def main() -> None:
     branch = get_current_branch()
 
     print(f"\n{'━'*50}")
-    print("  CI GATE WRAPPER — CDMAD Enforcement Layer")
+    print("  CI GATE WRAPPER — CDMAE Enforcement Layer")
     print(f"{'━'*50}")
     print(f"  Agent:  {agent_id}")
     print(f"  Branch: {branch}")
@@ -53,15 +53,15 @@ def main() -> None:
     print(f"{'━'*50}\n")
 
     headers: dict[str, str] = {}
-    gate_token = os.environ.get("CDMAD_GATE_TOKEN")
+    gate_token = os.environ.get("CDMAE_GATE_TOKEN")
     if gate_token:
         headers["X-Gate-Token"] = gate_token
     else:
         # Local dev bypass — tell orchestrator to skip auth
-        os.environ["CDMAD_LOCAL_DEV"] = "1"
+        os.environ["CDMAE_LOCAL_DEV"] = "1"
 
     url = _orchestrator_url()
-    verify_ssl = os.environ.get("CDMAD_HTTPS_VERIFY", "1") != "0"
+    verify_ssl = os.environ.get("CDMAE_HTTPS_VERIFY", "1") != "0"
 
     try:
         response = httpx.post(url, json={

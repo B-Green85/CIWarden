@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dev_loop.sh — CDMAD auto-fix commit loop
+# dev_loop.sh — CDMAE auto-fix commit loop
 # Usage: scripts/dev_loop.sh "commit message" [max_retries]
 set -euo pipefail
 
@@ -8,7 +8,7 @@ MAX_RETRIES="${2:-10}"
 ATTEMPT=0
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  CDMAD Dev Loop — auto-fix commit cycle"
+echo "  CDMAE Dev Loop — auto-fix commit cycle"
 echo "  Max retries: ${MAX_RETRIES}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
@@ -40,7 +40,7 @@ while [ "$ATTEMPT" -lt "$MAX_RETRIES" ]; do
     # Truncate output to avoid oversized prompts
     TRUNCATED=$(echo "$COMMIT_OUTPUT" | tail -60)
 
-    claude -p "The CDMAD gate chain blocked this commit. Fix the issues in the codebase. Do not modify tests or gate configs. Here is the gate output:
+    claude -p "The CDMAE gate chain blocked this commit. Fix the issues in the codebase. Do not modify tests or gate configs. Here is the gate output:
 
 ${TRUNCATED}"
 

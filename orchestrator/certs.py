@@ -36,7 +36,7 @@ def generate_self_signed_cert(
 
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, "cdmad-orchestrator"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "CDMAD"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "CDMAE"),
     ])
 
     cert = (
@@ -88,5 +88,5 @@ def ensure_certs(
 
 
 def is_https_enabled() -> bool:
-    """Check if HTTPS mode is active via CDMAD_HTTPS=1."""
-    return os.environ.get("CDMAD_HTTPS", "0") == "1"
+    """Check if HTTPS mode is active via CDMAE_HTTPS=1."""
+    return os.environ.get("CDMAE_HTTPS", "0") == "1"

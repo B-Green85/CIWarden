@@ -2,7 +2,7 @@
 API key authentication for the orchestrator.
 
 Stores keys in auth.db. Generates a master key on first startup.
-Local dev bypass: if CDMAD_LOCAL_DEV=1, auth is skipped.
+Local dev bypass: if CDMAE_LOCAL_DEV=1, auth is skipped.
 """
 from __future__ import annotations
 
@@ -76,4 +76,4 @@ def ensure_master_key(db_path: str | None = None) -> str | None:
 
 def is_local_dev_mode() -> bool:
     """Check if local dev bypass is active."""
-    return os.environ.get("CDMAD_LOCAL_DEV", "0") == "1"
+    return os.environ.get("CDMAE_LOCAL_DEV", "0") == "1"
