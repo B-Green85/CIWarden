@@ -6,7 +6,7 @@
 
 **The system governed its own birth.**
 
-Today was the first commit of the CI Gate Wrapper — a 7-gate CDMAE enforcement chain built to govern agentic development. Before a single line could be pushed to GitHub, the system required its own code to pass every gate it was designed to enforce.
+Today was the first commit of the CI Gate Wrapper — a 7-gate CDMAD enforcement chain built to govern agentic development. Before a single line could be pushed to GitHub, the system required its own code to pass every gate it was designed to enforce.
 
 It did not make this easy.
 
@@ -80,7 +80,7 @@ Commit SHA:  7940496
 
 **Security** — bandit flagged `0.0.0.0` bindings and a `GateStatus.PASS` string as a hardcoded password. Both intentional. Suppressed with `# nosec` and global ignores.
 
-**Memory** — The memory gate reached the Anthropic API and extracted real architectural contracts from the codebase. First blocked because no API key existed. Then blocked because the Anthropic console billing flow had a UI issue that prevented credit purchase. Once resolved and a valid key was set, the gate ran — 78 seconds of contract extraction — and passed. Later blocked again by drift exceeding 0.3 threshold due to legitimate architectural changes mid-session. Threshold raised to 0.5 with `CDMAE_DRIFT_THRESHOLD` env var override.
+**Memory** — The memory gate reached the Anthropic API and extracted real architectural contracts from the codebase. First blocked because no API key existed. Then blocked because the Anthropic console billing flow had a UI issue that prevented credit purchase. Once resolved and a valid key was set, the gate ran — 78 seconds of contract extraction — and passed. Later blocked again by drift exceeding 0.3 threshold due to legitimate architectural changes mid-session. Threshold raised to 0.5 with `CDMAD_DRIFT_THRESHOLD` env var override.
 
 **Stress** — The stress gate found `httpx` in the orchestrator and concluded there were API integrations to stress test. There weren't — the httpx calls were internal gate-to-gate communication. Fixed by excluding infrastructure directories (`orchestrator/`, `gates/`, `hooks/`, `scripts/`, `memory/`) from the API detection scan. Once fixed, the gate saw no external API integrations and auto-passed in 30ms.
 
@@ -137,9 +137,9 @@ Yesterday CI Wrapper governed its own birth in 88 minutes and 24 commit attempts
 
 Three commits landed on the `v1.1` branch:
 
-1. **Enterprise auth layer** — API key authentication on `POST /commit` via `X-Gate-Token` header, SHA-256 key hashing in `orchestrator/auth.db`, master key auto-generated on first startup, local dev bypass when `CDMAE_GATE_TOKEN` unset
+1. **Enterprise auth layer** — API key authentication on `POST /commit` via `X-Gate-Token` header, SHA-256 key hashing in `orchestrator/auth.db`, master key auto-generated on first startup, local dev bypass when `CDMAD_GATE_TOKEN` unset
 
-2. **HTTPS support** — Self-signed certificate generation on first startup via `cryptography` library, uvicorn SSL when `CDMAE_HTTPS=1`, `CDMAE_HTTPS_VERIFY=0` for self-signed cert bypass in the pre-commit hook, SAN includes `localhost` + `127.0.0.1`, private key locked to `0600`
+2. **HTTPS support** — Self-signed certificate generation on first startup via `cryptography` library, uvicorn SSL when `CDMAD_HTTPS=1`, `CDMAD_HTTPS_VERIFY=0` for self-signed cert bypass in the pre-commit hook, SAN includes `localhost` + `127.0.0.1`, private key locked to `0600`
 
 3. **.env config** — `start_gates.py` auto-loads `.env` on startup, injects variables into the environment before spawning any gate services, `.env.example` template with all config vars
 

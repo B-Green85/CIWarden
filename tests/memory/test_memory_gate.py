@@ -188,12 +188,12 @@ class TestMemoryGateThresholdOverride:
         assert gate.threshold == 0.8
 
     def test_env_var_override(self, store: ContractStore) -> None:
-        with patch.dict("os.environ", {"CDMAE_DRIFT_THRESHOLD": "0.7"}):
+        with patch.dict("os.environ", {"CDMAD_DRIFT_THRESHOLD": "0.7"}):
             gate = MemoryGate(llm_client=MockLLMClient(), store=store)
         assert gate.threshold == 0.7
 
     def test_env_var_takes_precedence_over_constructor(self, store: ContractStore) -> None:
-        with patch.dict("os.environ", {"CDMAE_DRIFT_THRESHOLD": "0.2"}):
+        with patch.dict("os.environ", {"CDMAD_DRIFT_THRESHOLD": "0.2"}):
             gate = MemoryGate(llm_client=MockLLMClient(), store=store, drift_threshold=0.9)
         assert gate.threshold == 0.2
 
@@ -220,7 +220,7 @@ class TestSourceShaCache:
 
     @pytest.mark.asyncio
     async def test_cache_skips_on_same_source(self, store: ContractStore) -> None:
-        with patch.dict("os.environ", {"CDMAE_MEMORY_CACHE": "1"}):
+        with patch.dict("os.environ", {"CDMAD_MEMORY_CACHE": "1"}):
             gate = MemoryGate(llm_client=MockLLMClient(), store=store)
             files = {"mod": "class A: pass"}
 
@@ -234,7 +234,7 @@ class TestSourceShaCache:
 
     @pytest.mark.asyncio
     async def test_cache_reruns_on_changed_source(self, store: ContractStore) -> None:
-        with patch.dict("os.environ", {"CDMAE_MEMORY_CACHE": "1"}):
+        with patch.dict("os.environ", {"CDMAD_MEMORY_CACHE": "1"}):
             gate = MemoryGate(llm_client=MockLLMClient(), store=store)
 
             await gate.run(source_files={"mod": "class A: pass"})
@@ -245,7 +245,7 @@ class TestSourceShaCache:
 
     @pytest.mark.asyncio
     async def test_cache_not_written_on_fail(self, store: ContractStore) -> None:
-        with patch.dict("os.environ", {"CDMAE_MEMORY_CACHE": "1"}):
+        with patch.dict("os.environ", {"CDMAD_MEMORY_CACHE": "1"}):
             # First gen — establish baseline with 3 contracts
             client1 = HighDriftLLMClient(
                 contracts=[
@@ -281,7 +281,7 @@ class TestSourceShaCache:
 
     @pytest.mark.asyncio
     async def test_cache_disabled_does_not_skip(self, store: ContractStore) -> None:
-        """Without CDMAE_MEMORY_CACHE=1, no caching occurs even with identical sources."""
+        """Without CDMAD_MEMORY_CACHE=1, no caching occurs even with identical sources."""
         gate = MemoryGate(llm_client=MockLLMClient(), store=store)
         files = {"mod": "class A: pass"}
 

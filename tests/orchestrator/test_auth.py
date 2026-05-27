@@ -106,21 +106,21 @@ class TestAuthModule:
     def test_is_local_dev_mode(self) -> None:
         from orchestrator.auth import is_local_dev_mode
 
-        with patch.dict(os.environ, {"CDMAE_LOCAL_DEV": "1"}):
+        with patch.dict(os.environ, {"CDMAD_LOCAL_DEV": "1"}):
             assert is_local_dev_mode()
-        with patch.dict(os.environ, {"CDMAE_LOCAL_DEV": "0"}):
+        with patch.dict(os.environ, {"CDMAD_LOCAL_DEV": "0"}):
             assert not is_local_dev_mode()
 
 
 class TestAuthMiddleware:
     def test_missing_token_returns_401(self, client: TestClient) -> None:
-        with patch.dict(os.environ, {"CDMAE_LOCAL_DEV": "0"}, clear=False):
+        with patch.dict(os.environ, {"CDMAD_LOCAL_DEV": "0"}, clear=False):
             resp = client.post("/commit", json=PAYLOAD)
         assert resp.status_code == 401
         assert "Missing" in resp.json()["detail"]
 
     def test_invalid_token_returns_401(self, client: TestClient) -> None:
-        with patch.dict(os.environ, {"CDMAE_LOCAL_DEV": "0"}, clear=False):
+        with patch.dict(os.environ, {"CDMAD_LOCAL_DEV": "0"}, clear=False):
             resp = client.post(
                 "/commit",
                 json=PAYLOAD,
@@ -138,7 +138,7 @@ class TestAuthMiddleware:
             "output": "", "exit_code": 0, "duration_ms": 1,
         }
         with (
-            patch.dict(os.environ, {"CDMAE_LOCAL_DEV": "0"}, clear=False),
+            patch.dict(os.environ, {"CDMAD_LOCAL_DEV": "0"}, clear=False),
             patch("orchestrator.orchestrator.call_gate", return_value=mock_result),
         ):
             resp = client.post(
@@ -155,13 +155,13 @@ class TestAuthMiddleware:
             "output": "", "exit_code": 0, "duration_ms": 1,
         }
         with (
-            patch.dict(os.environ, {"CDMAE_LOCAL_DEV": "1"}, clear=False),
+            patch.dict(os.environ, {"CDMAD_LOCAL_DEV": "1"}, clear=False),
             patch("orchestrator.orchestrator.call_gate", return_value=mock_result),
         ):
             resp = client.post("/commit", json=PAYLOAD)
         assert resp.status_code != 401
 
     def test_get_endpoints_skip_auth(self, client: TestClient) -> None:
-        with patch.dict(os.environ, {"CDMAE_LOCAL_DEV": "0"}, clear=False):
+        with patch.dict(os.environ, {"CDMAD_LOCAL_DEV": "0"}, clear=False):
             resp = client.get("/status")
         assert resp.status_code == 200

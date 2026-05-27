@@ -105,9 +105,9 @@ class TestIsHttpsEnabled:
             assert not is_https_enabled()
 
     def test_returns_true_when_set(self) -> None:
-        with patch.dict(os.environ, {"CDMAE_HTTPS": "1"}):
+        with patch.dict(os.environ, {"CDMAD_HTTPS": "1"}):
             assert is_https_enabled()
 
     def test_returns_false_when_zero(self) -> None:
-        with patch.dict(os.environ, {"CDMAE_HTTPS": "0"}):
+        with patch.dict(os.environ, {"CDMAD_HTTPS": "0"}):
             assert not is_https_enabled()

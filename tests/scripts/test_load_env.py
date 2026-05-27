@@ -116,13 +116,13 @@ class TestLoadEnv:
         env_file = tmp_path / ".env"
         env_file.write_text(
             "ANTHROPIC_API_KEY=sk-ant-test123\n"
-            "CDMAE_LOCAL_DEV=1\n"
-            "CDMAE_DRIFT_THRESHOLD=0.5\n"
+            "CDMAD_LOCAL_DEV=1\n"
+            "CDMAD_DRIFT_THRESHOLD=0.5\n"
         )
 
         with patch.dict(os.environ, {}, clear=True):
             loaded = load_env(str(env_file))
 
         assert loaded["ANTHROPIC_API_KEY"] == "sk-ant-test123"
-        assert loaded["CDMAE_LOCAL_DEV"] == "1"
-        assert loaded["CDMAE_DRIFT_THRESHOLD"] == "0.5"
+        assert loaded["CDMAD_LOCAL_DEV"] == "1"
+        assert loaded["CDMAD_DRIFT_THRESHOLD"] == "0.5"
