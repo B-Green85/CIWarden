@@ -103,7 +103,7 @@ class TestRateLimitState:
         state = RateLimitState(limit=100)
         assert state.limit == 100
         assert state.remaining == 100
-        assert state.window_seconds == 60
+        assert state.window_seconds == 1
 
     def test_reset_if_expired(self) -> None:
         state = RateLimitState(limit=100, window_seconds=0)

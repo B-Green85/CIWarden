@@ -79,7 +79,7 @@ class LLMClient(ABC):
 class AnthropicClient(LLMClient):
     """Contract extraction using the Anthropic Python SDK."""
 
-    def __init__(self, api_key: str | None = None, model: str = "claude-sonnet-4-20250514") -> None:
+    def __init__(self, api_key: str | None = None, model: str = "claude-haiku-4-5-20251001") -> None:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.model = model
         if not self.api_key:

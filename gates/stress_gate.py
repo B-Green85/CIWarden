@@ -98,7 +98,7 @@ class StressTestResult(BaseModel):
 class RateLimitState:
     """Mutable rate limit state for the mock endpoint."""
 
-    def __init__(self, limit: int, window_seconds: int = 60) -> None:
+    def __init__(self, limit: int, window_seconds: int = 1) -> None:
         self.limit: int = limit
         self.remaining: int = limit
         self.window_seconds: int = window_seconds
