@@ -8,20 +8,29 @@ import time
 from fastapi import FastAPI
 
 from gates.base_gate import GateResult, GateStatus
-from memory.contract_store import ContractStore
-from memory.llm_client import AnthropicClient, LLMClient
+from memory.contract_store import BaseContractStore, ContractStore, VectorContractStore
 from memory.memory_gate import MemoryGate
+from memory.schema_capture import SchemaCaptureClient, _get_repo_name
 
 app = FastAPI(title="CI Gate: memory")
 
 
-def get_llm_client() -> LLMClient:
-    """Build LLM client from environment variables."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        msg = "ANTHROPIC_API_KEY environment variable required for memory gate"
-        raise RuntimeError(msg)
-    return AnthropicClient(api_key=api_key)
+def get_store() -> BaseContractStore:
+    """Select the contract store backend from CDMAD_STORE (json|vdb)."""
+    if os.environ.get("CDMAD_STORE") == "vdb":
+        return VectorContractStore(
+            repo_name=os.environ.get("CDMAD_REPO_NAME") or _get_repo_name(),
+            vdb_root=os.environ.get("CDMAD_VDB_PATH", ".cdmad/vdb"),
+        )
+    return ContractStore(root=os.environ.get("CDMAD_ROOT", ".cdmad"))
+
+
+def get_client() -> SchemaCaptureClient:
+    """Build the static (LLM-free) extraction client."""
+    return SchemaCaptureClient(
+        schema_path=os.environ.get("CDMAD_SCHEMA_PATH", ".cdmad/session_schema.json"),
+        repo_name=os.environ.get("CDMAD_REPO_NAME"),
+    )
 
 
 @app.get("/health")
@@ -33,11 +42,14 @@ async def health() -> dict[str, str | int]:
 async def run() -> GateResult:
     start = time.time()
     try:
-        client = get_llm_client()
-        store = ContractStore()
-        gate = MemoryGate(llm_client=client, store=store)
+        gate = MemoryGate(
+            llm_client=get_client(),
+            store=get_store(),
+            repo_name=os.environ.get("CDMAD_REPO_NAME"),
+            agent_id=os.environ.get("CDMAD_AGENT_ID"),
+        )
         return await gate.run()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         duration = int((time.time() - start) * 1000)
         return GateResult(
             gate="memory",

@@ -7,7 +7,6 @@ import os
 import re
 from abc import ABC, abstractmethod
 
-import anthropic
 import httpx
 
 from memory.models import ContractSummary
@@ -80,6 +79,9 @@ class AnthropicClient(LLMClient):
     """Contract extraction using the Anthropic Python SDK."""
 
     def __init__(self, api_key: str | None = None, model: str = "claude-haiku-4-5-20251001") -> None:
+        import anthropic  # lazy — only imported when AnthropicClient is actually used
+
+        self._anthropic = anthropic
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.model = model
         if not self.api_key:
@@ -93,7 +95,7 @@ class AnthropicClient(LLMClient):
         generation_id: str,
         sequence: int,
     ) -> ContractSummary:
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
+        client = self._anthropic.AsyncAnthropic(api_key=self.api_key)
         user_message = (
             f"Module: {module_name}\n"
             f"Generation ID: {generation_id}\n"
