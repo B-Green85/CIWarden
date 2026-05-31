@@ -35,7 +35,8 @@ class TestRunEndpoint:
             exit_code=0,
             duration_ms=100,
         )
-        with patch("memory.app.get_llm_client"), \
+        with patch("memory.app.get_client"), \
+             patch("memory.app.get_store"), \
              patch("memory.app.MemoryGate") as mock_gate_cls:
             mock_gate_instance = mock_gate_cls.return_value
             mock_gate_instance.run = AsyncMock(return_value=mock_result)
@@ -46,17 +47,18 @@ class TestRunEndpoint:
             assert data["status"] == "pass"
             assert data["gate"] == "memory"
 
-    def test_run_returns_fail_on_missing_api_key(self, client: TestClient) -> None:
-        with patch.dict("os.environ", {}, clear=True), \
-             patch("memory.app.get_llm_client", side_effect=RuntimeError("No API key")):
-                resp = client.post("/run")
-                assert resp.status_code == 200
-                data = resp.json()
-                assert data["status"] == "fail"
-                assert "error" in data["output"].lower()
+    def test_run_returns_fail_on_client_build_error(self, client: TestClient) -> None:
+        # The gate no longer needs an API key; a store/client build error still fails safe.
+        with patch("memory.app.get_store", side_effect=RuntimeError("store unavailable")):
+            resp = client.post("/run")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "fail"
+            assert "error" in data["output"].lower()
 
     def test_run_returns_fail_on_gate_error(self, client: TestClient) -> None:
-        with patch("memory.app.get_llm_client"), \
+        with patch("memory.app.get_client"), \
+             patch("memory.app.get_store"), \
              patch("memory.app.MemoryGate") as mock_gate_cls:
             mock_gate_instance = mock_gate_cls.return_value
             mock_gate_instance.run = AsyncMock(side_effect=RuntimeError("boom"))

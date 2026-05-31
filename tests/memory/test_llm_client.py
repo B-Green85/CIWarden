@@ -79,9 +79,7 @@ class TestAnthropicClient:
         mock_client_instance = AsyncMock()
         mock_client_instance.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch("memory.llm_client.anthropic") as mock_anthropic:
-            mock_anthropic.AsyncAnthropic.return_value = mock_client_instance
-
+        with patch("anthropic.AsyncAnthropic", return_value=mock_client_instance):
             client = AnthropicClient(api_key="test-key")
             result = await client.extract_contracts("class Foo: pass", "gates", "gen_001", 1)
 
@@ -107,9 +105,7 @@ class TestAnthropicClient:
         mock_client_instance = AsyncMock()
         mock_client_instance.messages.create = AsyncMock(return_value=mock_response)
 
-        with patch("memory.llm_client.anthropic") as mock_anthropic:
-            mock_anthropic.AsyncAnthropic.return_value = mock_client_instance
-
+        with patch("anthropic.AsyncAnthropic", return_value=mock_client_instance):
             client = AnthropicClient(api_key="test-key")
             result = await client.extract_contracts("x = 1", "test", "gen_001", 1)
             assert result.module == "test"

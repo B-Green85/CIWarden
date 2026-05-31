@@ -8,11 +8,12 @@ from unittest.mock import patch
 import pytest
 
 from gates.base_gate import GateStatus
-from memory.contract_store import ContractStore
+from memory.contract_store import ContractStore, VectorContractStore
 from memory.drift_scorer import DRIFT_THRESHOLD
 from memory.llm_client import LLMClient
 from memory.memory_gate import MemoryGate, _compute_source_sha
 from memory.models import ContractEntry, ContractSummary, ContractType
+from memory.schema_capture import SchemaCaptureClient
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -303,3 +304,108 @@ class TestMemoryGateMultipleModules:
         assert result.status == GateStatus.PASS
         assert "gates" in result.output
         assert "orchestrator" in result.output
+
+
+@pytest.fixture()
+def vdb_store(tmp_path: Path) -> VectorContractStore:
+    return VectorContractStore("R", vdb_root=tmp_path / "vdb", session_id="V1", agent_id="ag")
+
+
+class TestMemoryGateVDBBackend:
+    """Same gate behavior over the VDB backend (solo mode)."""
+
+    @pytest.mark.asyncio
+    async def test_first_generation_passes(self, vdb_store: VectorContractStore) -> None:
+        gate = MemoryGate(llm_client=MockLLMClient(), store=vdb_store)
+        result = await gate.run(source_files={"mod": "class A: pass"})
+        assert result.status == GateStatus.PASS
+        assert "first generation" in result.output
+
+    @pytest.mark.asyncio
+    async def test_commit_session_once_after_loop(self, tmp_path: Path) -> None:
+        root = tmp_path / "vdb"
+        store = VectorContractStore("R", vdb_root=root, session_id="V1", agent_id="ag")
+        calls = {"n": 0}
+        original = store.commit_session
+
+        def counting(contracts: object) -> None:
+            calls["n"] += 1
+            original(contracts)  # type: ignore[arg-type]
+
+        store.commit_session = counting  # type: ignore[method-assign]
+        gate = MemoryGate(llm_client=MockLLMClient(), store=store)
+        await gate.run(source_files={"a": "class A: pass", "b": "class B: pass"})
+        # One atomic commit for the whole generation, not one-per-module.
+        assert calls["n"] == 1
+        assert store._load_index()["latest_session"] == "V1"
+        assert not list(store.live_dir.glob("*.json"))
+
+    @pytest.mark.asyncio
+    async def test_second_generation_no_drift(self, tmp_path: Path) -> None:
+        root = tmp_path / "vdb"
+        g1 = MemoryGate(MockLLMClient(), VectorContractStore("R", vdb_root=root, session_id="V1", agent_id="ag"))
+        await g1.run(source_files={"mod": "class A: pass"})
+        g2 = MemoryGate(MockLLMClient(), VectorContractStore("R", vdb_root=root, session_id="V2", agent_id="ag"))
+        r2 = await g2.run(source_files={"mod": "class A: pass"})
+        assert r2.status == GateStatus.PASS
+        assert "No drift detected" in r2.output
+
+
+class TestMemoryGateManagedMode:
+    @pytest.mark.asyncio
+    async def test_managed_is_read_only(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        root = tmp_path / "vdb"
+        # Two committed solo generations establish N-1 and N.
+        await MemoryGate(MockLLMClient(), VectorContractStore("R", vdb_root=root, session_id="V1", agent_id="ag")).run(
+            source_files={"mod": "class A: pass"}
+        )
+        await MemoryGate(MockLLMClient(), VectorContractStore("R", vdb_root=root, session_id="V2", agent_id="ag")).run(
+            source_files={"mod": "class A: pass"}
+        )
+        # Managed mode must NOT call the LLM — a FailingLLMClient would error if it did.
+        monkeypatch.setenv("CDMAD_MANAGED", "1")
+        store_vm = VectorContractStore("R", vdb_root=root, session_id="VM", agent_id="ag")
+        managed = MemoryGate(FailingLLMClient(), store_vm)
+        result = await managed.run(source_files={"mod": "ignored"})
+        assert result.status == GateStatus.PASS
+        assert "MANAGED" in result.output
+
+    @pytest.mark.asyncio
+    async def test_managed_no_committed_contracts(
+        self, vdb_store: VectorContractStore, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("CDMAD_MANAGED", "1")
+        gate = MemoryGate(FailingLLMClient(), vdb_store)
+        result = await gate.run(source_files=None)
+        assert result.status == GateStatus.PASS
+        assert "no committed contracts" in result.output
+
+
+class TestMemoryGateSchemaCaptureIntegration:
+    @pytest.mark.asyncio
+    async def test_ast_path_through_gate(self, tmp_path: Path) -> None:
+        # No schema file → SchemaCaptureClient AST fallback, exercised via the gate.
+        client = SchemaCaptureClient(schema_path=tmp_path / "absent.json", repo_name="R")
+        gate = MemoryGate(client, VectorContractStore("R", vdb_root=tmp_path / "vdb", agent_id="ag"))
+        result = await gate.run(source_files={"mod": "def handler(): ...\nclass Svc: ..."})
+        assert result.status == GateStatus.PASS
+
+    @pytest.mark.asyncio
+    async def test_schema_path_through_gate(self, tmp_path: Path) -> None:
+        import json
+
+        schema = tmp_path / "schema.json"
+        schema.write_text(json.dumps({
+            "module_key": "mod",
+            "modules": {"mod": {"contracts": [{"type": "function", "name": "f"}], "exposes": []}},
+        }))
+        client = SchemaCaptureClient(schema_path=schema, repo_name="R")
+        gate = MemoryGate(client, VectorContractStore("R", vdb_root=tmp_path / "vdb", agent_id="ag"))
+        result = await gate.run(source_files={"mod": "irrelevant since schema present"})
+        assert result.status == GateStatus.PASS
+
+    def test_no_anthropic_client_in_gate_module(self) -> None:
+        import memory.memory_gate as gate_mod
+
+        # The gate execution path imports no AnthropicClient symbol.
+        assert not hasattr(gate_mod, "AnthropicClient")

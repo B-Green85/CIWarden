@@ -1,0 +1,142 @@
+"""Distribution + agent-signalling protocol for the Conductor.
+
+Owns the staging directory layout, prompt injection (including the COMMIT PROTOCOL
+additions and the ``module_key`` stamp), and the ``.done`` / ``.conflict_report.txt``
+filesystem handshake the agents use to signal completion and receive conflict reports.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from conductor.session import AgentSpec, ConductorSession
+
+DONE_FLAG = ".done"
+CONFLICT_REPORT_FILE = ".conflict_report.txt"
+SCHEMA_TEMPLATE = ".cdmad/session_schema.json"
+
+_COMMIT_PROTOCOL = """\
+
+--- COMMIT PROTOCOL (Conductor-managed) ---
+When your files are complete, signal the Conductor:
+  touch {staging_dir}/.done
+
+Before resubmitting after a conflict, read carefully:
+  {staging_dir}/.conflict_report.txt
+Address EVERY point in the report before rewriting.
+Do not resubmit until all points are resolved.
+"""
+
+
+def staging_dir(session: ConductorSession, agent: AgentSpec) -> Path:
+    return agent.staging_dir(session.staging_root)
+
+
+def distribute(session: ConductorSession) -> None:
+    """Create each agent's staging directory and write its prompt + schema template."""
+    for agent in session.agents:
+        adir = staging_dir(session, agent)
+        (adir / agent.subsystem_path).mkdir(parents=True, exist_ok=True)
+        _write_prompt(adir, agent)
+        _write_schema_template(adir, session, agent)
+
+
+def _write_prompt(adir: Path, agent: AgentSpec) -> None:
+    body = agent.prompt + _COMMIT_PROTOCOL.format(staging_dir=adir)
+    (adir / "PROMPT.md").write_text(body)
+
+
+def _write_schema_template(adir: Path, session: ConductorSession, agent: AgentSpec) -> None:
+    """Stamp the agent's session_schema.json with module_key + identifiers.
+
+    The agent fills in modules/exposes/consumes; the Conductor owns module_key so
+    the gate's VDB lookups resolve regardless of directory naming.
+    """
+    empty_module: dict[str, list[Any]] = {
+        "contracts": [],
+        "exposes": [],
+        "consumes": [],
+        "assumptions": [],
+        "dependencies": [],
+    }
+    template = {
+        "module_key": agent.module_key,
+        "repo": session.repo_name,
+        "session_id": session.session_id,
+        "modules": {agent.module_key: empty_module},
+    }
+    schema_path = adir / SCHEMA_TEMPLATE
+    schema_path.parent.mkdir(parents=True, exist_ok=True)
+    schema_path.write_text(json.dumps(template, indent=2))
+
+
+# ── Agent signalling ─────────────────────────────────────────────
+
+
+def is_done(session: ConductorSession, agent: AgentSpec) -> bool:
+    return (staging_dir(session, agent) / DONE_FLAG).exists()
+
+
+def clear_done(session: ConductorSession, agent: AgentSpec) -> None:
+    flag = staging_dir(session, agent) / DONE_FLAG
+    if flag.exists():
+        flag.unlink()
+
+
+def write_conflict_report(session: ConductorSession, agent: AgentSpec, report: str) -> None:
+    """Write the conflict report and clear .done so the agent re-signals when fixed."""
+    adir = staging_dir(session, agent)
+    (adir / CONFLICT_REPORT_FILE).write_text(report)
+    clear_done(session, agent)
+
+
+def read_agent_schema(session: ConductorSession, agent: AgentSpec) -> dict[str, Any]:
+    """Read the agent's produced session_schema.json (empty dict if absent/invalid)."""
+    schema_path = staging_dir(session, agent) / SCHEMA_TEMPLATE
+    if not schema_path.exists():
+        return {}
+    try:
+        data = json.loads(schema_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def collect_files(session: ConductorSession, agent: AgentSpec) -> list[str]:
+    """Repo-relative file paths the agent produced under its subsystem path."""
+    adir = staging_dir(session, agent)
+    out: list[str] = []
+    for path in sorted(adir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(adir)
+        if rel.name in {DONE_FLAG, CONFLICT_REPORT_FILE, "PROMPT.md"}:
+            continue
+        if rel.parts and rel.parts[0] == ".cdmad":
+            continue
+        out.append(str(rel))
+    return out
+
+
+def wait_for_done(
+    session: ConductorSession,
+    agents: list[AgentSpec],
+    poll_interval: float = 1.0,
+    timeout: float | None = None,
+) -> bool:
+    """Block until all given agents have written .done. Returns True if all signalled."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    pending = list(agents)
+    while pending:
+        pending = [a for a in pending if not is_done(session, a)]
+        if not pending:
+            return True
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_interval)
+    return True
