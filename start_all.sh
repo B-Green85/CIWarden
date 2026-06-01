@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# start_all.sh — bring up the GateChain stack in dependency order:
+# start_all.sh — bring up the CIWarden stack in dependency order:
 #
 #   1. Gate chain        orchestrator :8000 + gates 8001-8007   [background]
 #   2. Commit queue      drains commits serially, calls :8000    [background]

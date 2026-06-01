@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Start all CI gate services + orchestrator in separate processes.
+Start all CIWarden gate services + orchestrator in separate processes.
 Usage: python scripts/start_gates.py
        python scripts/start_gates.py --stop
 """
@@ -57,7 +57,7 @@ def start_all() -> None:
         print(f"\n[ENV] Loaded {len(loaded)} variable(s) from .env")
 
     pids: dict[str, int] = {}
-    print("\n[CI GATE WRAPPER] Starting all services...\n")
+    print("\n[CIWARDEN] Starting all services...\n")
 
     # Start each gate service
     for name, config in GATE_REGISTRY.items():

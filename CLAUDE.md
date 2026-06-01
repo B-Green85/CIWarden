@@ -1,4 +1,4 @@
-# CI Gate Wrapper — CLAUDE.md
+# CIWarden — CLAUDE.md
 
 ## What This Project Is
 

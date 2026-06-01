@@ -1,5 +1,5 @@
 """
-CI Gate Orchestrator — the enforcement brain.
+CIWarden Orchestrator — the enforcement brain.
 Receives agent commits, runs gate chain, issues or blocks merge tokens.
 
 POST /commit  → run full gate chain
@@ -31,7 +31,7 @@ from orchestrator.auth import (  # noqa: E402
     validate_key,
 )
 
-app = FastAPI(title="CI Gate Orchestrator", version="1.1.0")
+app = FastAPI(title="CIWarden Orchestrator", version="1.1.0")
 
 # ── Auth setup ────────────────────────────────────────────────
 init_auth_db()
@@ -152,7 +152,7 @@ async def call_gate(client: httpx.AsyncClient, name: str) -> dict[str, Any]:
     config = GATE_REGISTRY[name]
     url = f"http://localhost:{config['port']}/run"
     try:
-        response = await client.post(url, timeout=120)
+        response = await client.post(url, timeout=300)
         return response.json()  # type: ignore[no-any-return]
     except Exception as e:
         return {

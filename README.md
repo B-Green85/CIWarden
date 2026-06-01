@@ -1,4 +1,4 @@
-# CI Gate Wrapper
+# CIWarden
 
 ### CDMAD Enforcement Layer for Agentic Development
 
@@ -20,7 +20,7 @@ This is that layer.
 
 ## What It Is
 
-The CI Gate Wrapper is a seven-gate enforcement chain that sits between code generation and merge. Every commit — human or agent — must pass all seven gates before a merge token is issued. No token, no merge. No exceptions. No bypasses.
+CIWarden is a seven-gate enforcement chain that sits between code generation and merge. Every commit — human or agent — must pass all seven gates before a merge token is issued. No token, no merge. No exceptions. No bypasses.
 
 It is the mechanical implementation of **CDMAD** — Constraint Driven Model Assisted Development. The principle is simple: generation is optional. Verification is not.
 
@@ -433,7 +433,7 @@ pytest --cov=gates --cov=orchestrator --cov=memory --cov-report=term-missing
 ## Project Structure
 
 ```
-ci-gate-wrapper/
+ciwarden/
 ├── start_all.sh              One-command launcher — gate chain + queue worker + conductor
 ├── conductor/                Multi-agent orchestration with atomic commit
 │   ├── cli.py                Setup wizard + session run loop

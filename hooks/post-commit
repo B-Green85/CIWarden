@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# CI Gate post-commit hook.
+# CIWarden post-commit hook.
 # Install: cp hooks/post-commit .git/hooks/post-commit && chmod +x .git/hooks/post-commit
 #
 # Fires after every successful commit. Appends the just-created commit to

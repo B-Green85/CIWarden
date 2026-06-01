@@ -12,7 +12,7 @@ from memory.contract_store import BaseContractStore, ContractStore, VectorContra
 from memory.memory_gate import MemoryGate
 from memory.schema_capture import SchemaCaptureClient, _get_repo_name
 
-app = FastAPI(title="CI Gate: memory")
+app = FastAPI(title="CIWarden: memory")
 
 
 def get_store() -> BaseContractStore:

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CI Gate pre-commit hook.
+CIWarden pre-commit hook.
 Install: cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 """
 import os
@@ -10,7 +10,7 @@ import sys
 try:
     import httpx
 except ImportError:
-    print("[CI GATE] httpx not installed — run: pip install httpx")
+    print("[CIWARDEN] httpx not installed — run: pip install httpx")
     sys.exit(1)
 
 AGENT_ID = "local-dev"  # override with env var CI_AGENT_ID
@@ -62,7 +62,7 @@ def main() -> None:
     branch = get_current_branch()
 
     print(f"\n{'━'*50}")
-    print("  CI GATE WRAPPER — CDMAD Enforcement Layer")
+    print("  CIWARDEN — CDMAD Enforcement Layer")
     print(f"{'━'*50}")
     print(f"  Agent:  {agent_id}")
     print(f"  Branch: {branch}")

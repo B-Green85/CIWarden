@@ -25,7 +25,7 @@ class BaseGate:
         self.name = name
         self.command = command
         self.port = port
-        self.app = FastAPI(title=f"CI Gate: {name}")
+        self.app = FastAPI(title=f"CIWarden: {name}")
         self.app.post("/run", response_model=GateResult)(self.run)
         self.app.get("/health")(self.health)
 
