@@ -39,6 +39,23 @@ def get_current_branch() -> str:
     except Exception:
         return "unknown"
 
+def _update_commit_log() -> None:
+    """Append a line to the commit log after a passing gate run.
+
+    Best-effort side effect — must never block the commit or add a failure mode.
+    """
+    try:
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        subprocess.run(
+            [sys.executable, os.path.join(repo_root, "scripts", "update_commit_log.py")],
+            check=False,  # never block the commit
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        return  # commit log update is best-effort, never fatal
+
+
 def main() -> None:
     agent_id = os.environ.get("CI_AGENT_ID", AGENT_ID)
     sha = get_current_sha()
@@ -108,6 +125,9 @@ def main() -> None:
 
     print("✦  ALL GATES PASSED")
     print(f"   Merge token: {data['merge_token']}\n")
+
+    # Best-effort commit-log update — runs after the gate chain passes, never blocks.
+    _update_commit_log()
     sys.exit(0)
 
 
