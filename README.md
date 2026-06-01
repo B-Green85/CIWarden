@@ -194,13 +194,6 @@ Run this once per repository you want governed.
 git add .
 git commit -m "feat(gates): your message"
 ```
-### 6. No verify commit
-
-When committing documentation changes
-
-```bash
-git commit --no-verify -m "feat(sentinel): initial build — sentinel-core, sentinel-types, sentinel-signals, sentinel-controls, sentinel-py"
-```
 
 The gate chain runs automatically on every commit. If any gate fails the commit is blocked with the specific failure output. Fix the issue and recommit.
 
