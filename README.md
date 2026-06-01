@@ -146,7 +146,24 @@ The Conductor is the first and last authority over a multi-agent generation sess
 3. **Proofs** output in dependency order. The `PeerChecker` cross-checks each agent against its peers' live schemas for symbol collisions, interface mismatches, and assumption clashes. On conflict it writes an escalating `.conflict_report.txt`; the agent rewrites and re-signals with `.done`. No retry limit.
 4. **Atomic commit** once every agent is clean: the contract corpus is committed to the VDB, staged files are copied into the worktree, and a single commit-queue entry is enqueued — one atomic commit for the whole generation. The gate chain then runs as normal, with the memory gate in managed mode reading the just-committed VDB.
 
-**Resuming a failed attempt.** `python3 -m conductor --resume` skips the wizard and rebuilds the session from the existing staging state (a manifest written at distribution time, plus each agent's `PROMPT.md`). It regenerates `launch_agents.sh`, clears stale `.done` flags, prints the launch command, and waits — so the operator can relaunch agents without re-entering any prompts. Distribution is skipped, so prompts and any agent-filled schemas are left untouched.
+### Resuming after a failed run
+
+If a session fails partway — an agent crashes, the build never goes green, or you stop the run — you don't have to re-enter the wizard. At distribution time the Conductor writes a `session.json` manifest into the staging root, so it can rebuild the entire session from disk:
+
+```bash
+python3 -m conductor --resume
+```
+
+This rebuilds the session from `/tmp/conductor_staging/session.json` and the existing `agent_NNN/PROMPT.md` files — same agents, same prompts, same target repo — and skips the wizard entirely. It then **regenerates** `launch_agents.sh`, **clears stale `.done` flags** (so the wait blocks for the relaunched agents instead of racing past on old output), and **skips distribution**, leaving each `PROMPT.md` and any agent-filled schema untouched. Finally it prints the launch command and waits, exactly as a fresh run does:
+
+```
+CONDUCTOR  ● resumed session 5ebdfc06be1f — 6 agents in staging
+CONDUCTOR  ● agents ready — launch them:
+           bash /tmp/conductor_staging/launch_agents.sh
+CONDUCTOR  ● waiting for .done from all agents...
+```
+
+Run that `bash …/launch_agents.sh` to relaunch the agent windows; once they finish, the Conductor proofs and atomic-commits as normal. If the manifest or any agent's `PROMPT.md` is missing, `--resume` exits with a clear message rather than guessing.
 
 The Conductor is pre-gate infrastructure. The gates don't know it exists — they verify what it produces. The merge token still belongs to the orchestrator.
 
