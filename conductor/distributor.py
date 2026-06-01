@@ -21,6 +21,7 @@ DONE_FLAG = ".done"
 CONFLICT_REPORT_FILE = ".conflict_report.txt"
 SCHEMA_TEMPLATE = ".cdmad/session_schema.json"
 LAUNCH_SCRIPT = "launch_agents.sh"
+PROMPT_FILE = "PROMPT.md"
 
 _COMMIT_PROTOCOL = """\
 
@@ -50,7 +51,7 @@ def distribute(session: ConductorSession) -> None:
 
 def _write_prompt(adir: Path, agent: AgentSpec) -> None:
     body = agent.prompt + _COMMIT_PROTOCOL.format(staging_dir=adir)
-    (adir / "PROMPT.md").write_text(body)
+    (adir / PROMPT_FILE).write_text(body)
 
 
 def _write_schema_template(adir: Path, session: ConductorSession, agent: AgentSpec) -> None:
@@ -171,7 +172,7 @@ def collect_files(session: ConductorSession, agent: AgentSpec) -> list[str]:
         if not path.is_file():
             continue
         rel = path.relative_to(adir)
-        if rel.name in {DONE_FLAG, CONFLICT_REPORT_FILE, "PROMPT.md"}:
+        if rel.name in {DONE_FLAG, CONFLICT_REPORT_FILE, PROMPT_FILE}:
             continue
         if rel.parts and rel.parts[0] == ".cdmad":
             continue

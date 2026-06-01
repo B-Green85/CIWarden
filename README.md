@@ -146,6 +146,8 @@ The Conductor is the first and last authority over a multi-agent generation sess
 3. **Proofs** output in dependency order. The `PeerChecker` cross-checks each agent against its peers' live schemas for symbol collisions, interface mismatches, and assumption clashes. On conflict it writes an escalating `.conflict_report.txt`; the agent rewrites and re-signals with `.done`. No retry limit.
 4. **Atomic commit** once every agent is clean: the contract corpus is committed to the VDB, staged files are copied into the worktree, and a single commit-queue entry is enqueued — one atomic commit for the whole generation. The gate chain then runs as normal, with the memory gate in managed mode reading the just-committed VDB.
 
+**Resuming a failed attempt.** `python3 -m conductor --resume` skips the wizard and rebuilds the session from the existing staging state (a manifest written at distribution time, plus each agent's `PROMPT.md`). It regenerates `launch_agents.sh`, clears stale `.done` flags, prints the launch command, and waits — so the operator can relaunch agents without re-entering any prompts. Distribution is skipped, so prompts and any agent-filled schemas are left untouched.
+
 The Conductor is pre-gate infrastructure. The gates don't know it exists — they verify what it produces. The merge token still belongs to the orchestrator.
 
 ---

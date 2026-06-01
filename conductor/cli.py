@@ -3,16 +3,27 @@
 Run with ``python3 -m conductor``. The wizard collects the target repo path, the
 agent count (1–12), and each agent's description + prompt, confirms, then drives:
 prime VDB → write metadata → distribute → wait for agents → proof → atomic commit.
+
+``python3 -m conductor --resume`` skips the wizard and rebuilds the session from the
+existing staging state (a failed attempt's prompts are reused as-is), regenerates the
+launch script, and waits for fresh ``.done`` signals.
 """
 
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from conductor import distributor
 from conductor.commit import atomic_commit
 from conductor.prover import initialize_vdb_metadata, proof_session
-from conductor.session import AgentSpec, ConductorSession, module_key_from_description
+from conductor.session import (
+    DEFAULT_STAGING_ROOT,
+    SESSION_MANIFEST,
+    AgentSpec,
+    ConductorSession,
+    module_key_from_description,
+)
 from conductor.vdb_io import _get_repo_name, prime_vdb_from_codebase
 
 MAX_AGENTS = 12
@@ -22,14 +33,25 @@ def _log(message: str) -> None:
     print(message)
 
 
-async def run_session(session: ConductorSession) -> bool:
-    """Execute a fully-specified session end to end. Returns True on clean commit."""
+async def run_session(session: ConductorSession, *, resume: bool = False) -> bool:
+    """Execute a fully-specified session end to end. Returns True on clean commit.
+
+    With ``resume=True`` the staging dirs and prompts already exist, so distribution
+    is skipped (it would overwrite each PROMPT.md and reset agent schemas); stale
+    ``.done`` flags are cleared so the wait blocks for the relaunched agents.
+    """
     await prime_vdb_from_codebase(session)
     initialize_vdb_metadata(session)
-    distributor.distribute(session)
+    if resume:
+        for agent in session.agents:
+            distributor.clear_done(session, agent)
+        _log(f"CONDUCTOR  ● resumed session {session.session_id} — {len(session.agents)} agents in staging")
+    else:
+        distributor.distribute(session)
+        session.save_manifest()
+        _log(f"CONDUCTOR  ● distributed to {len(session.agents)} agents")
 
     script_path = distributor.write_launch_script(session)
-    _log(f"CONDUCTOR  ● distributed to {len(session.agents)} agents")
     _log("CONDUCTOR  ● agents ready — launch them:")
     _log(f"           bash {script_path}")
 
@@ -73,8 +95,6 @@ def _read_multiline(end_marker: str = ".") -> str:
 
 
 def wizard() -> ConductorSession:
-    from pathlib import Path
-
     repo_root = Path(input("Target repo path: ").strip() or ".").expanduser().resolve()
     repo_name = _get_repo_name(repo_root)
     _log(f"CONDUCTOR — repo: {repo_name} ({repo_root})")
@@ -97,7 +117,45 @@ def wizard() -> ConductorSession:
     return ConductorSession(repo_root=repo_root, repo_name=repo_name, agents=agents)
 
 
+# ── Resume ───────────────────────────────────────────────────────
+
+
+def resume_session(staging_root: Path = DEFAULT_STAGING_ROOT) -> ConductorSession:
+    """Rebuild a session from existing staging state for ``--resume``.
+
+    Requires the manifest written at distribute time and a PROMPT.md in every agent
+    dir; raises SystemExit with a clear message if either is missing.
+    """
+    manifest = staging_root / SESSION_MANIFEST
+    if not manifest.exists():
+        msg = f"--resume: no session manifest at {manifest} — nothing to resume. Run the wizard first."
+        raise SystemExit(msg)
+
+    session = ConductorSession.from_manifest(staging_root)
+    missing = [
+        a.agent_id
+        for a in session.agents
+        if not (distributor.staging_dir(session, a) / distributor.PROMPT_FILE).exists()
+    ]
+    if missing:
+        msg = f"--resume: missing {distributor.PROMPT_FILE} for {', '.join(missing)} under {staging_root}"
+        raise SystemExit(msg)
+
+    _log(f"CONDUCTOR — resuming session {session.session_id}: {session.repo_name} ({session.repo_root})")
+    return session
+
+
 def main(argv: list[str] | None = None) -> int:
-    session = wizard()
-    ok = asyncio.run(run_session(session))
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="conductor", description="CDMAD multi-agent Conductor")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="skip the wizard and relaunch agents from existing staging state",
+    )
+    args = parser.parse_args(argv)
+
+    session = resume_session() if args.resume else wizard()
+    ok = asyncio.run(run_session(session, resume=args.resume))
     return 0 if ok else 1
