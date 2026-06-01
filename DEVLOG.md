@@ -213,3 +213,255 @@ v1.0.0 was me doing everything. v1.1 was me doing only what required me.
 ---
 
 *"Generation is optional. Verification is not."*
+
+---
+
+## May 27, 2026 — Golem Linux Phase 1 / GateChain v2
+
+**The system was pushed harder than it had ever been pushed. Two bugs present since v1.0.0 surfaced and were fixed. A new subsystem shipped.**
+
+Today was the Golem Linux Phase 1 build — six Claude Code instances running simultaneously, each building an independent kernel subsystem. Boot, memory, scheduler, syscall, filesystem, sentinel. The gate chain had governed single-agent sessions before. It had never governed six agents hitting the same repo, the same git index, and the same orchestrator at the same time.
+
+It did not handle this gracefully. Not at first.
+
+---
+
+### What Was Built
+
+**Golem Linux Phase 1 — six kernel subsystems:**
+
+- `src/boot/` — UEFI entry stub, PE32+ application, x86_64 NASM bootloader (Agent 1)
+- `src/memory/` — bitmap frame allocator, 4-level page tables, linked-list heap (Agent 2)
+- `src/scheduler/` — process control block, round-robin scheduler, x86_64 context switch (Agent 3)
+- `src/syscall/` — SYSCALL/SYSRET entry, dispatch table, system call handlers (Agent 4)
+- `src/fs/` — VFS layer, RamFS in-memory bootstrap filesystem (Agent 5)
+- `src/sentinel/` — audit chain, invisibility gate, registration handshake, four-signal degradation monitor (Agent 6)
+
+**GateChain v2 — commit queue:**
+
+- `queue/commit_queue.py` — 756 lines, SQLite-backed serial processing
+- Agents enqueue commits instead of calling git directly
+- Worker processes one commit at a time, polls until `.git/index.lock` clears
+- Runs explicit pathspec `git add`, commits, waits for gate, issues queue token on success
+
+---
+
+### The Index Lock Problem
+
+Six agents. One git index. The memory gate runs for ~125 seconds. While it runs, the index is locked. Five other agents are trying to commit. Contention was severe — agents failed, retried, failed again, stacked up.
+
+The commit queue solved it. Serial processing. One commit at a time. Agents enqueue and wait. The queue worker owns the index. The contention disappeared.
+
+---
+
+### Bug 1: Stress Gate — Broken Since v1.0.0
+
+**The bug:** `window_seconds=60` in `RateLimitState.__init__`. The rate limiter window was 60 seconds — 100 requests filled it in 1.4 seconds at 70 RPS, then 58 seconds of rejections. Error rate: 80%. The stress gate was simulating a catastrophically broken API on every test.
+
+**Why it was never caught:** The stress gate has two modes. If no HTTP client imports are detected in non-infrastructure directories, it auto-passes in 30ms. For months it was auto-passing — all httpx usage was in excluded infrastructure directories. The commit queue agent added `httpx` to `queue/commit_queue.py`, a non-excluded directory, which triggered the full load simulation for the first time.
+
+**Fix:** `window_seconds=1` — 100 requests per second, correct behavior for rate limit stress testing.
+
+**Fix landed:** Unit test updated, `assert state.window_seconds == 1`.
+
+The stress gate has now run correctly for the first time since March 4.
+
+---
+
+### Bug 2: Orchestrator Timeout — Cascading Failures Under Load
+
+**The bug:** `timeout=120` in `orchestrator/orchestrator.py`. The memory gate legitimately takes ~125 seconds under normal load. The orchestrator was timing out and treating memory gate success as failure, then cascading that failure downstream.
+
+**Why it was never caught:** Single-agent sessions complete fast enough that the memory gate rarely pushed past 120 seconds. Six agents hitting the orchestrator sequentially via the queue meant each memory gate run went to completion — and the timeout fired.
+
+**Fix:** `timeout=300`.
+
+---
+
+### Memory Gate: Haiku
+
+**Before:** `model: str = "claude-sonnet-4-20250514"`
+**After:** `model: str = "claude-haiku-4-5-20251001"`
+
+The memory gate calls the Anthropic API on every commit for architectural contract extraction. Sonnet-level reasoning is not required for contract scoring. Haiku is significantly faster and cheaper.
+
+**Result:** Memory gate runtime dropped from ~125s to ~70s.
+
+---
+
+### Session Stats
+
+| Metric | Value |
+|---|---|
+| Agents | 6 simultaneous |
+| Subsystems built | 6 |
+| Gate chain runs | Multiple per agent |
+| Bugs fixed | 2 (stress gate window, orchestrator timeout) |
+| New subsystem | Commit queue (756 lines) |
+| Memory gate runtime | ~125s → ~70s (Haiku swap) |
+
+---
+
+### What the Multi-Agent Build Revealed
+
+**The gate chain was designed for single agents.** Every assumption in the original architecture — one commit at a time, one agent at a time, one index lock at a time — held because there was only ever one agent. Six agents stress-tested every assumption simultaneously.
+
+**Serial enforcement is the right model.** The commit queue doesn't weaken the gate chain — it makes it viable at multi-agent scale. Each commit still passes all seven gates. The queue just ensures they don't fight over the infrastructure while waiting.
+
+**Latency compounds under load.** 125 seconds is acceptable for one agent. For six agents queuing behind each other, it's a session bottleneck. The Haiku swap to 70 seconds matters more in multi-agent sessions than it ever would in a single-agent session.
+
+**Hidden bugs surface under real load.** The stress gate rate limit bug existed for 84 days before it was found. The orchestrator timeout existed for 84 days. Neither surfaced in single-agent sessions. Six agents running simultaneously found both on the same day.
+
+---
+
+### Final Gate Run (representative — commit queue session)
+
+```
+✓  lint         PASS      71ms
+✓  typecheck    PASS     834ms
+✓  security     PASS     612ms
+✓  memory       PASS   71203ms
+✓  test         PASS    9821ms
+✓  stress       PASS   14832ms
+✓  build        PASS     203ms
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Total               97576ms
+
+✦  ALL GATES PASSED
+```
+
+---
+
+*"Generation is optional. Verification is not."*
+
+---
+
+## May 31, 2026 — GateChain v3 / Conductor
+
+**The gate chain gets a conductor. The memory gate loses its API dependency. The multi-agent coordination problem gets a structural solution.**
+
+Today was architecture, not code. The spec that governs the next build was written, reviewed, assessed, corrected, and consolidated. No code landed — by design. The gate chain enforces that nothing ships without passing verification. The same discipline applies to the spec itself: nothing gets built from a document that hasn't been reviewed and signed off.
+
+Two Claude Code sessions. One assessment. One addendum. One consolidated v2.0 spec. Ready for implementation tonight.
+
+---
+
+### What Was Designed
+
+**Memory Gate — LLM extraction removed:**
+
+The Haiku API call is replaced by `SchemaCaptureClient` — a static AST-based extractor. Python files analyzed via `ast` module. Rust files analyzed via regex targeting public interface declarations and assumption comments. No network call. No API key required for the memory gate from this point forward.
+
+Memory gate latency: **~70s (Haiku) → ~500ms (AST)**
+
+**VectorContractStore — implemented:**
+
+The `VectorContractStore` scaffold has been present since v1.0.0 with every method raising `NotImplementedError`. The v3 spec fully implements it — JSON VDB, scoped per repository and per session, no new dependencies. The existing JSON contract store (`.cdmad/contracts/`) remains the default (`CDMAD_STORE=json`). VDB is opt-in (`CDMAD_STORE=vdb`).
+
+**Conductor — new 7-file orchestration package:**
+
+```
+conductor/
+  __init__.py
+  cli.py          setup wizard — agent count, subsystem paths, prompts, confirm
+  session.py      ConductorSession dataclass + state
+  vdb_io.py       VDB I/O + prime_vdb_from_codebase + _get_repo_name
+  distributor.py  staging dir layout, prompt injection, .done polling
+  prover.py       parse staging in dependency order, drive PeerChecker, escalate reports
+  commit.py       atomic commit: commit_session → copy to worktree → one queue entry
+```
+
+The Conductor is the first and last authority in every multi-agent generation session. It reads all agent prompts before any agent sees them, extracts the dependency graph, primes the VDB from the existing codebase if empty, distributes prompts with staging directives, proofs all output before a single file reaches the repo, and issues one atomic commit when all agents are clean.
+
+**Atomic commit — the gap that closes:**
+
+Before v3, the gate chain was rigorous at the individual commit level but had no concept of multi-agent session coherence. An agent could pass every gate and still ship code that contradicted what a peer agent built in the same session. The gates checked each commit in isolation.
+
+The atomic commit closes that gap. Nothing reaches the repository until the Conductor has verified the entire generation is internally consistent — every interface declared was delivered, every `consumes` matched the corresponding `exposes`, no symbol collisions across subsystem boundaries.
+
+**Peer Checker — intra-session drift:**
+
+Three conflict types detected before anything touches the repo:
+- `COLLISION` — same symbol exposed by two agents
+- `INTERFACE_MISMATCH` — agent consumes a symbol with wrong signature
+- `ASSUMPTION_CLASH` — contradicting assumptions about shared state
+
+Conflict reports escalate in specificity with each retry. No retry limit. The offending agent works until its output is clean.
+
+**Solo/managed mode branch in memory gate:**
+
+- **Solo mode** (default CI, no Conductor): gate extracts via `SchemaCaptureClient`, buffers all module summaries, calls `commit_session()` once after the module loop, scores against prior session.
+- **Managed mode** (`CDMAD_MANAGED=1`): Conductor already wrote the VDB during proofing. Gate is read-only — loads committed session N vs N-1, scores, passes or blocks. No extraction, no writes.
+
+---
+
+### The Review Process
+
+The spec was written, then handed to Claude Code for assessment before implementation was authorized. Claude Code read the full spec and the existing memory implementation and returned a structured assessment identifying four blocking conflicts:
+
+1. `conductor.py` labeled as MODIFY — no conductor file exists in the repo. Greenfield build, ~600–900 LOC.
+2. `VectorContractStore` method count wrong — 9 abstract methods, not 5. `list_contracts` omitted entirely.
+3. `anthropic` removal would break the import chain — unconditional top-level `import anthropic` in `llm_client.py`.
+4. `_execute` cannot be unchanged — the reader/writer split between gate and Conductor is a fundamental architectural change.
+
+Plus one self-contradiction: "atomic commit" vs "one queue entry per file" — incompatible.
+
+An addendum was written resolving all five issues. Both documents were reviewed and signed off. Then consolidated into a single authoritative v2.0 spec. No code was written until consolidation was complete.
+
+**This is the gate chain principle applied to the spec itself.**
+
+---
+
+### File Map (implementation — tonight)
+
+```
+0.  conductor/               NEW — greenfield, ~600–900 LOC
+1.  memory/llm_client.py     MODIFY — lazy anthropic import (gates step 9)
+2.  memory/schema_capture.py NEW
+3.  memory/contract_store.py MODIFY — all 9 abstract + 4 new methods
+4.  memory/peer_checker.py   NEW
+5.  memory/memory_gate.py    MODIFY — solo/managed mode branch
+6.  memory/app.py            MODIFY
+7.  scripts/prime_vdb.py     NEW
+8.  scripts/migrate_contracts.py  NEW
+9.  requirements.txt         MODIFY — remove anthropic (after step 1)
+10. .env.example             MODIFY
+11. tests/memory/            NEW
+```
+
+Zero changes to: `drift_scorer.py`, `models.py`, orchestrator, pre-commit hook, other gates, commit queue.
+
+---
+
+### New Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `CDMAD_STORE` | `json` | `json` or `vdb` — selects contract store backend |
+| `CDMAD_VDB_PATH` | `.cdmad/vdb` | Root directory for VDB JSON store |
+| `CDMAD_REPO_NAME` | auto from git | Override repo name for scoping |
+| `CDMAD_SCHEMA_PATH` | `.cdmad/session_schema.json` | Where agents write declared schema |
+| `CDMAD_AGENT_ID` | auto hostname+pid | Identifies agent's live schema file |
+| `CDMAD_MANAGED` | unset | `1` when Conductor launches the gate run |
+| `CDMAD_PEER_CHECK` | `1` | `0` to disable intra-session peer checking |
+| `CDMAD_RETRIEVAL_TOP_K` | `20` | Max contracts retrieved per commit |
+
+`ANTHROPIC_API_KEY` no longer required by the memory gate.
+
+---
+
+### Migration
+
+All existing `.cdmad/contracts/` history migrates to `.cdmad/vdb/ci-wrapper/` via `scripts/migrate_contracts.py`. Non-destructive — JSON archive preserved. The audit trail in `audit.db` is untouched.
+
+---
+
+### What Stays the Same
+
+The gate chain. All seven gates. Same ports, same phases, same enforcement. Pre-commit hook unchanged. Merge token still the only valid exit condition. SQLite audit trail still running. Every commit still passes all seven gates or doesn't land.
+
+The Conductor is pre-gate infrastructure. The gates don't know it exists.
+
+---
+
+*"Generation is optional. Verification is not."*
