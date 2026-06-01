@@ -13,14 +13,19 @@ DEFAULT_STAGING_ROOT = Path(tempfile.gettempdir()) / "conductor_staging"
 DEFAULT_VDB_ROOT = Path(".cdmad/vdb")
 
 
+def module_key_from_description(description: str) -> str:
+    """Derive a schema/VDB module key from a short description: lowercase, spaces→underscores."""
+    return "_".join(description.lower().split())
+
+
 @dataclass
 class AgentSpec:
     """One agent's assignment within a session."""
 
     agent_id: str               # e.g. "agent_001"
-    subsystem_path: str         # repo-relative path this agent owns, e.g. "src/scheduler/"
+    description: str            # short human label, e.g. "memory allocator"
     prompt: str                 # the generation prompt
-    module_key: str             # schema/VDB key for this subsystem, e.g. "scheduler"
+    module_key: str             # schema/VDB key, derived from description, e.g. "memory_allocator"
     dependencies: list[str] = field(default_factory=list)  # module_keys this agent depends on
 
     def staging_dir(self, staging_root: Path) -> Path:

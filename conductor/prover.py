@@ -122,7 +122,7 @@ def proof_session(
                 break
             report = checker.format_conflict_report(
                 agent.agent_id,
-                agent.subsystem_path,
+                agent.description,
                 conflicts,
                 attempts[agent.agent_id],
                 distributor.staging_dir(session, agent),

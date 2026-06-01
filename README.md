@@ -139,10 +139,10 @@ Measures: error rate, timeout rate, latency (p50/p95/p99), retry storm detection
 
 The Conductor is the first and last authority over a multi-agent generation session. Where the gate chain governs individual commits, the Conductor makes the **session** ungameable: nothing reaches the repo until every agent's output is internally consistent.
 
-`python3 -m conductor` opens a setup wizard — number of agents (1–12), each agent's subsystem path and prompt — then runs the session:
+`python3 -m conductor` opens a setup wizard — target repo path, number of agents (1–12), and each agent's short description and prompt — then runs the session. The `module_key` is derived from the description (lowercase, spaces→underscores); the staging path is derived from the agent index (`agent_001`, `agent_002`, …):
 
 1. **Primes the VDB** from the existing codebase on cold start, and writes the dependency graph and expected-interface baseline.
-2. **Distributes** each agent to its own staging directory under `/tmp/conductor_staging/`, stamping a `module_key` into its schema. Agents write only to staging — never the repo.
+2. **Distributes** each agent to its own staging directory under `/tmp/conductor_staging/agent_NNN/`, stamping a `module_key` into its schema. Agents write to their staging root; the Conductor collects whatever they actually produce there. Agents write only to staging — never the repo.
 3. **Proofs** output in dependency order. The `PeerChecker` cross-checks each agent against its peers' live schemas for symbol collisions, interface mismatches, and assumption clashes. On conflict it writes an escalating `.conflict_report.txt`; the agent rewrites and re-signals with `.done`. No retry limit.
 4. **Atomic commit** once every agent is clean: the contract corpus is committed to the VDB, staged files are copied into the worktree, and a single commit-queue entry is enqueued — one atomic commit for the whole generation. The gate chain then runs as normal, with the memory gate in managed mode reading the just-committed VDB.
 

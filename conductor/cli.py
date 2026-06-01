@@ -1,7 +1,7 @@
 """Conductor CLI — setup wizard and session orchestration.
 
-Run with ``python3 -m conductor``. The wizard collects agent count (1–12), each
-agent's subsystem path / module_key / dependencies / prompt, confirms, then drives:
+Run with ``python3 -m conductor``. The wizard collects the target repo path, the
+agent count (1–12), and each agent's description + prompt, confirms, then drives:
 prime VDB → write metadata → distribute → wait for agents → proof → atomic commit.
 """
 
@@ -12,7 +12,7 @@ import asyncio
 from conductor import distributor
 from conductor.commit import atomic_commit
 from conductor.prover import initialize_vdb_metadata, proof_session
-from conductor.session import AgentSpec, ConductorSession
+from conductor.session import AgentSpec, ConductorSession, module_key_from_description
 from conductor.vdb_io import _get_repo_name, prime_vdb_from_codebase
 
 MAX_AGENTS = 12
@@ -28,7 +28,12 @@ async def run_session(session: ConductorSession) -> bool:
     initialize_vdb_metadata(session)
     distributor.distribute(session)
 
-    _log(f"CONDUCTOR  ● distributed to {len(session.agents)} agents — waiting for .done")
+    script_path = distributor.write_launch_script(session)
+    _log(f"CONDUCTOR  ● distributed to {len(session.agents)} agents")
+    _log("CONDUCTOR  ● agents ready — launch them:")
+    _log(f"           bash {script_path}")
+
+    _log("CONDUCTOR  ● waiting for .done from all agents...")
     distributor.wait_for_done(session, session.agents)
 
     _log("CONDUCTOR  ● proofing in dependency order...")
@@ -70,21 +75,19 @@ def _read_multiline(end_marker: str = ".") -> str:
 def wizard() -> ConductorSession:
     from pathlib import Path
 
-    repo_root = Path.cwd()
+    repo_root = Path(input("Target repo path: ").strip() or ".").expanduser().resolve()
     repo_name = _get_repo_name(repo_root)
-    _log(f"CONDUCTOR — repo: {repo_name}")
+    _log(f"CONDUCTOR — repo: {repo_name} ({repo_root})")
 
     count = _ask_int(f"How many agents? (1-{MAX_AGENTS})", 1, MAX_AGENTS)
     agents: list[AgentSpec] = []
     for i in range(1, count + 1):
         agent_id = f"agent_{i:03d}"
-        subsystem = input(f"  [{agent_id}] subsystem path: ").strip()
-        module_key = input(f"  [{agent_id}] module_key: ").strip() or subsystem.strip("/").split("/")[-1]
-        deps_raw = input(f"  [{agent_id}] dependencies (comma-sep, blank=none): ")
-        deps = [d.strip() for d in deps_raw.split(",") if d.strip()]
+        description = input(f"  [{agent_id}] description (e.g. 'memory allocator'): ").strip()
+        module_key = module_key_from_description(description)
         _log(f"  [{agent_id}] prompt (end with a line containing only '.'):")
         prompt = _read_multiline()
-        agents.append(AgentSpec(agent_id, subsystem, prompt, module_key, deps))
+        agents.append(AgentSpec(agent_id, description, prompt, module_key))
 
     _log(f"\nLaunch {count} agents on {repo_name}? [y/N]")
     if input().strip().lower() != "y":
