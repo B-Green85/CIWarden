@@ -179,14 +179,21 @@ CDMAD_DRIFT_THRESHOLD=0.5      # Memory gate drift sensitivity (default 0.5)
 
 This brings up the seven gate services, the orchestrator, and the commit queue worker in dependency order, with your `.env` variables already in their environment. Leave it running — these are live services. (`./start_all.sh` without the flag also launches the interactive Conductor wizard; `./start_all.sh --stop` halts everything.)
 
-### 4. Install the pre-commit hook
+### 4. Install the git hooks
 
 ```bash
+# Pre-commit — enforces the gate chain (blocks the commit on any failure)
 cp hooks/pre-commit .git/hooks/pre-commit
 chmod +x .git/hooks/pre-commit
+
+# Post-commit — best-effort commit log (never blocks; always exits 0)
+cp hooks/post-commit .git/hooks/post-commit
+chmod +x .git/hooks/post-commit
 ```
 
-Run this once per repository you want governed.
+Run this once per repository you want governed. The pre-commit hook is the
+enforcement boundary; the post-commit hook appends each gated commit to
+`.cdmad/commit_log.jsonl` for the devlog writer to consume.
 
 ### 5. Commit as normal
 

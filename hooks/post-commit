@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#
+# CI Gate post-commit hook.
+# Install: cp hooks/post-commit .git/hooks/post-commit && chmod +x .git/hooks/post-commit
+#
+# Fires after every successful commit. Appends the just-created commit to
+# .cdmad/commit_log.jsonl via update_commit_log.py (git metadata + the
+# orchestrator's gate-run audit trail). Best-effort — never fails the commit;
+# always exits 0 regardless of whether the script succeeds.
+#
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+python3 "$ROOT/scripts/update_commit_log.py" >/dev/null 2>&1 || true
+exit 0
