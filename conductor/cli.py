@@ -37,14 +37,15 @@ async def run_session(session: ConductorSession, *, resume: bool = False) -> boo
     """Execute a fully-specified session end to end. Returns True on clean commit.
 
     With ``resume=True`` the staging dirs and prompts already exist, so distribution
-    is skipped (it would overwrite each PROMPT.md and reset agent schemas); stale
-    ``.done`` flags are cleared so the wait blocks for the relaunched agents.
+    is skipped (it would overwrite each PROMPT.md and reset agent schemas).
+
+    Before proofing we always clear stale ``.done`` flags and block on a fresh signal
+    from every agent — the Conductor must never enter proofing on leftover flags or an
+    empty staging dir.
     """
     await prime_vdb_from_codebase(session)
     initialize_vdb_metadata(session)
     if resume:
-        for agent in session.agents:
-            distributor.clear_done(session, agent)
         _log(f"CONDUCTOR  ● resumed session {session.session_id} — {len(session.agents)} agents in staging")
     else:
         distributor.distribute(session)
@@ -55,8 +56,19 @@ async def run_session(session: ConductorSession, *, resume: bool = False) -> boo
     _log("CONDUCTOR  ● agents ready — launch them:")
     _log(f"           bash {script_path}")
 
+    if not session.agents:
+        _log("CONDUCTOR  ✗ no agents in this session — nothing to wait for or proof")
+        return False
+
+    # Clear any stale .done (from a prior or failed attempt) so the wait blocks for
+    # the agents the operator is about to (re)launch — never proof on leftover flags.
+    for agent in session.agents:
+        distributor.clear_done(session, agent)
+
     _log("CONDUCTOR  ● waiting for .done from all agents...")
-    distributor.wait_for_done(session, session.agents)
+    if not distributor.wait_for_done(session, session.agents):
+        _log("CONDUCTOR  ✗ timed out waiting for .done — not entering proofing")
+        return False
 
     _log("CONDUCTOR  ● proofing in dependency order...")
     if not proof_session(session):
@@ -64,6 +76,9 @@ async def run_session(session: ConductorSession, *, resume: bool = False) -> boo
         return False
 
     files = atomic_commit(session)
+    if not files:
+        _log("CONDUCTOR  ✗ nothing committed — agents staged no files (see warning above)")
+        return False
     _log(f"CONDUCTOR  ✓ atomic commit enqueued — {len(files)} files, session {session.session_id}")
     return True
 

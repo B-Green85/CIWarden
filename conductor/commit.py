@@ -30,6 +30,10 @@ if TYPE_CHECKING:
 _enqueue: Callable[..., int] | None = None
 
 
+def _log(message: str) -> None:
+    print(message)
+
+
 def _load_enqueue() -> Callable[..., int]:
     """Load queue.commit_queue.enqueue by path.
 
@@ -80,21 +84,31 @@ def copy_staged_to_worktree(session: ConductorSession) -> list[str]:
 def atomic_commit(session: ConductorSession, *, cleanup: bool = True) -> list[str]:
     """Commit VDB, copy files, enqueue ONE queue entry. Returns the committed file list.
 
-    Raises if there are no files to commit (nothing to enqueue).
+    Returns an empty list — without advancing the VDB, enqueuing, or tearing down
+    staging — when the agents produced no staged files (e.g. they wrote directly to
+    the repo instead of their staging dirs). This never raises on an empty session;
+    the caller decides how to surface it.
     """
     enqueue = _load_enqueue()
 
-    # 1. Commit the VDB corpus atomically (must precede the gate run).
+    # 1. Copy staged files into the worktree. Do this FIRST: if the agents staged
+    #    nothing (e.g. they wrote straight to the repo), bail before mutating the VDB
+    #    so we neither advance an empty generation nor enqueue an empty commit. Staging
+    #    is left intact for inspection / --resume.
+    files = copy_staged_to_worktree(session)
+    if not files:
+        _log(
+            "CONDUCTOR  ⚠ no staged files to commit — agents wrote nothing to their "
+            "staging dirs (did they write directly to the repo?); skipping commit",
+        )
+        return []
+
+    # 2. Commit the VDB corpus atomically — MUST precede the queue entry so the managed
+    #    memory gate reads the just-committed session (N vs N-1), not stale state.
     store = store_for(session)
     s = store.get_or_create_session()
     store.advance_session(s)
     store.commit_session(assemble_summaries(session))
-
-    # 2. Copy staged files into the worktree.
-    files = copy_staged_to_worktree(session)
-    if not files:
-        msg = "atomic_commit: no staged files to commit"
-        raise RuntimeError(msg)
 
     # 3. Enqueue ONE entry with the full file list — the worker does the single commit.
     message = f"feat(conductor): atomic commit session {session.session_id} ({len(session.agents)} agents)"
