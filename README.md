@@ -2,7 +2,7 @@
 
 ### CDMAD Enforcement Layer for Agentic Development
 
-**Copyright (c) 2026 Brandon Green. All rights reserved.**
+**Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.**
 
 ---
 
@@ -532,4 +532,4 @@ All variables can be set in `.env` at the project root. See `.env.example` for a
 ---
 
 *CDMAD — Constraint Driven Model Assisted Development*
-*Copyright (c) 2026 Brandon Green. All rights reserved.*
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*
