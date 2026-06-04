@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -53,6 +55,60 @@ def _load_enqueue() -> Callable[..., int]:
     spec.loader.exec_module(module)
     _enqueue = module.enqueue
     return _enqueue
+
+
+def _worker_module_path() -> Path:
+    """Path to queue/commit_queue.py — the worker entry point (loaded by path, no package)."""
+    return Path(__file__).resolve().parent.parent / "queue" / "commit_queue.py"
+
+
+def _worker_running(repo_root: Path) -> bool:
+    """True if a queue worker process is already draining ``repo_root``.
+
+    Matches the worker command line via ``pgrep -f`` against the resolved repo path, so
+    a worker started by start_all.sh, the CLI, or a prior Conductor run is all detected
+    the same way. Returns False if pgrep is unavailable — better to risk a second worker
+    (they serialize on the DB write lock) than to never start one.
+    """
+    pattern = f"commit_queue.py worker --repo {repo_root}"
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def ensure_worker(session: ConductorSession) -> bool:
+    """Start a detached queue worker for the target repo if none is running.
+
+    The worker MUST point at the target repo (``session.repo_root``), not the ciwarden
+    repo — it owns the git index there, performs the single commit, and drives the gate
+    chain. It is detached (``start_new_session``) so it outlives this Conductor process
+    and keeps draining the queue. Returns True if a worker was started, False if one was
+    already running. Logs ``CONDUCTOR  ● queue worker started for {repo_name}`` on launch.
+    """
+    repo_root = session.repo_root.resolve()
+    if _worker_running(repo_root):
+        return False
+
+    log_dir = repo_root / ".cdmad"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "queue_worker.log"
+
+    with log_path.open("a") as log_file:
+        subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            [sys.executable, str(_worker_module_path()), "worker", "--repo", str(repo_root)],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    _log(f"CONDUCTOR  ● queue worker started for {session.repo_name}")
+    return True
 
 
 def assemble_summaries(session: ConductorSession) -> list[ContractSummary]:
@@ -113,6 +169,11 @@ def atomic_commit(session: ConductorSession, *, cleanup: bool = True) -> list[st
     # 3. Enqueue ONE entry with the full file list — the worker does the single commit.
     message = f"feat(conductor): atomic commit session {session.session_id} ({len(session.agents)} agents)"
     enqueue(str(session.repo_root), files, message, agent_id="conductor")
+
+    # 3a. Ensure a queue worker is draining the TARGET repo — start one if not. Without
+    #     this the entry sits pending forever unless the operator launched a worker by
+    #     hand; the worker points at session.repo_root, never the ciwarden repo.
+    ensure_worker(session)
 
     # 4. Tear down staging.
     if cleanup and session.staging_root.exists():

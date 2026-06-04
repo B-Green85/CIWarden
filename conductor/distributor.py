@@ -9,6 +9,7 @@ handshake the agents use to signal completion and receive conflict reports.
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -23,9 +24,21 @@ SCHEMA_TEMPLATE = ".cdmad/session_schema.json"
 LAUNCH_SCRIPT = "launch_agents.sh"
 PROMPT_FILE = "PROMPT.md"
 
+
+def _log(message: str) -> None:
+    print(message)
+
 _COMMIT_PROTOCOL = """\
 
 --- COMMIT PROTOCOL (Conductor-managed) ---
+WRITE ONLY to your staging directory:
+  {staging_dir}
+Every file you produce MUST live under that exact path. Do NOT write, edit, or
+create files anywhere else in the target repository, and do NOT run git yourself.
+The Conductor copies your staging dir into the repo atomically after proofing —
+files written directly to the repo are NOT collected, will NOT be committed, and
+break the gate chain. Staging is the only path your output reaches the repo.
+
 When your files are complete, signal the Conductor:
   touch {staging_dir}/.done
 
@@ -180,17 +193,83 @@ def collect_files(session: ConductorSession, agent: AgentSpec) -> list[str]:
     return out
 
 
+def staging_is_empty(session: ConductorSession, agent: AgentSpec) -> bool:
+    """True if the agent has produced no deliverable files in its staging dir."""
+    return not collect_files(session, agent)
+
+
+def repo_untracked_for_agent(session: ConductorSession, agent: AgentSpec) -> list[str]:
+    """Untracked repo files whose path matches the agent's module_key.
+
+    Soft-signal heuristic: when an agent ignores the staging-only protocol and writes
+    deliverables straight into the target repo, its staging dir stays empty but new
+    untracked files matching its module_key appear. Matching is by module_key tokens
+    (split on ``_``, dropping tokens shorter than 3 chars) — every token must appear
+    in the lowercased path, so ``memory_allocator`` matches ``src/memory/allocator.py``.
+    Returns [] on any git error; this is advisory only, never authoritative.
+    """
+    tokens = [t for t in agent.module_key.lower().split("_") if len(t) >= 3]
+    if not tokens:
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(session.repo_root), "status",
+             "--porcelain", "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return []
+    if result.returncode != 0:
+        return []
+    matches: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line.startswith("??"):
+            continue
+        path = line[3:].strip()
+        lowered = path.lower()
+        if all(tok in lowered for tok in tokens):
+            matches.append(path)
+    return matches
+
+
 def wait_for_done(
     session: ConductorSession,
     agents: list[AgentSpec],
     poll_interval: float = 1.0,
     timeout: float | None = None,
 ) -> bool:
-    """Block until all given agents have written .done. Returns True if all signalled."""
+    """Block until all given agents have signalled. Returns True if all signalled.
+
+    An agent signals normally by writing ``.done``. As a fallback, an agent whose
+    staging dir is empty but whose module_key matches new untracked files in the repo
+    is treated as a *soft signal*: it wrote to the repo instead of staging (violating
+    the protocol), so we warn once and stop waiting on it rather than blocking forever.
+    ``atomic_commit`` will then surface the empty staging and refuse the commit.
+    """
     deadline = None if timeout is None else time.monotonic() + timeout
     pending = list(agents)
+    warned: set[str] = set()
     while pending:
-        pending = [a for a in pending if not is_done(session, a)]
+        still_pending: list[AgentSpec] = []
+        for a in pending:
+            if is_done(session, a):
+                continue
+            if staging_is_empty(session, a):
+                stray = repo_untracked_for_agent(session, a)
+                if stray:
+                    if a.agent_id not in warned:
+                        warned.add(a.agent_id)
+                        _log(
+                            f"CONDUCTOR  ⚠ {a.agent_id} ({a.module_key}) staged nothing "
+                            f"but wrote {len(stray)} matching file(s) directly to the repo "
+                            f"(e.g. {stray[0]}) — treating as soft signal, not waiting. "
+                            "Agents MUST write to staging only.",
+                        )
+                    continue
+            still_pending.append(a)
+        pending = still_pending
         if not pending:
             return True
         if deadline is not None and time.monotonic() >= deadline:
