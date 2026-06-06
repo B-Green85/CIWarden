@@ -39,9 +39,10 @@ async def run_session(session: ConductorSession, *, resume: bool = False) -> boo
     With ``resume=True`` the staging dirs and prompts already exist, so distribution
     is skipped (it would overwrite each PROMPT.md and reset agent schemas).
 
-    Before proofing we always clear stale ``.done`` flags and block on a fresh signal
-    from every agent — the Conductor must never enter proofing on leftover flags or an
-    empty staging dir.
+    On a fresh distribute we clear stale ``.done`` flags before blocking on a fresh
+    signal, so the Conductor never proofs on leftover flags. On ``resume=True`` we keep
+    any existing ``.done`` — the agents have already finished and resume must recover
+    those signals rather than block forever on ones that will never be rewritten.
     """
     await prime_vdb_from_codebase(session)
     initialize_vdb_metadata(session)
@@ -60,10 +61,15 @@ async def run_session(session: ConductorSession, *, resume: bool = False) -> boo
         _log("CONDUCTOR  ✗ no agents in this session — nothing to wait for or proof")
         return False
 
-    # Clear any stale .done (from a prior or failed attempt) so the wait blocks for
-    # the agents the operator is about to (re)launch — never proof on leftover flags.
-    for agent in session.agents:
-        distributor.clear_done(session, agent)
+    # On a fresh distribute, clear any stale .done (from a prior or failed attempt) so
+    # the wait blocks for the agents the operator is about to launch. On --resume do the
+    # OPPOSITE: the agents have already finished and written .done, so clearing here would
+    # discard the very signals resume exists to recover, leaving us blocked on a fresh
+    # .done that never comes. Preserve them; wait_for_done returns immediately for any
+    # agent already marked done.
+    if not resume:
+        for agent in session.agents:
+            distributor.clear_done(session, agent)
 
     _log("CONDUCTOR  ● waiting for .done from all agents...")
     if not distributor.wait_for_done(session, session.agents):
@@ -135,25 +141,26 @@ def wizard() -> ConductorSession:
 # ── Resume ───────────────────────────────────────────────────────
 
 
-def resume_session(staging_root: Path = DEFAULT_STAGING_ROOT) -> ConductorSession:
+def resume_session(staging_base: Path = DEFAULT_STAGING_ROOT) -> ConductorSession:
     """Rebuild a session from existing staging state for ``--resume``.
 
-    Requires the manifest written at distribute time and a PROMPT.md in every agent
-    dir; raises SystemExit with a clear message if either is missing.
+    Reads the manifest at the staging base (written at distribute time) and requires a
+    PROMPT.md in every agent's namespaced staging dir; raises SystemExit with a clear
+    message if either is missing.
     """
-    manifest = staging_root / SESSION_MANIFEST
+    manifest = staging_base / SESSION_MANIFEST
     if not manifest.exists():
         msg = f"--resume: no session manifest at {manifest} — nothing to resume. Run the wizard first."
         raise SystemExit(msg)
 
-    session = ConductorSession.from_manifest(staging_root)
+    session = ConductorSession.from_manifest(staging_base)
     missing = [
         a.agent_id
         for a in session.agents
         if not (distributor.staging_dir(session, a) / distributor.PROMPT_FILE).exists()
     ]
     if missing:
-        msg = f"--resume: missing {distributor.PROMPT_FILE} for {', '.join(missing)} under {staging_root}"
+        msg = f"--resume: missing {distributor.PROMPT_FILE} for {', '.join(missing)} under {session.staging_root}"
         raise SystemExit(msg)
 
     _log(f"CONDUCTOR — resuming session {session.session_id}: {session.repo_name} ({session.repo_root})")

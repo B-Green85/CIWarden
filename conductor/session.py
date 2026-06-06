@@ -8,14 +8,24 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Spec-mandated staging location; tempfile.gettempdir() resolves to /tmp on POSIX
-# while staying portable and avoiding a hardcoded /tmp literal.
-DEFAULT_STAGING_ROOT = Path(tempfile.gettempdir()) / "conductor_staging"
+# Spec-mandated staging base; tempfile.gettempdir() resolves to /tmp on POSIX while
+# staying portable and avoiding a hardcoded /tmp literal. Resolved once here so the
+# canonical absolute path (macOS maps /var/folders → /private/var/...) is stable and
+# can be persisted to the manifest, rather than recomputed per-process where $TMPDIR
+# drift would make the Conductor and a later --resume disagree on the path.
+DEFAULT_STAGING_ROOT = (Path(tempfile.gettempdir()) / "conductor_staging").resolve()
 DEFAULT_VDB_ROOT = Path(".cdmad/vdb")
 
-# Persisted under staging_root so ``--resume`` can rebuild the session (notably the
-# repo_root, which is not otherwise recoverable from the per-agent staging files).
+# The manifest lives at the staging *base* (not the namespaced per-session root) so
+# ``--resume`` can find it without already knowing the session_id. It records repo_root
+# plus the resolved staging paths, none of which are recoverable from the per-agent
+# staging files alone.
 SESSION_MANIFEST = "session.json"
+
+# Sentinel default for ConductorSession.staging_root: when left unset, the staging root
+# is derived as ``staging_base / repo_name / session_id`` (see __post_init__). Tests and
+# callers may still pass an explicit staging_root to pin an isolated directory.
+_DERIVE_STAGING_ROOT = Path("__derive_staging_root__")
 
 
 def module_key_from_description(description: str) -> str:
@@ -46,7 +56,16 @@ class ConductorSession:
     agents: list[AgentSpec]
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     vdb_root: Path = DEFAULT_VDB_ROOT
-    staging_root: Path = DEFAULT_STAGING_ROOT
+    staging_base: Path = DEFAULT_STAGING_ROOT
+    staging_root: Path = _DERIVE_STAGING_ROOT
+
+    def __post_init__(self) -> None:
+        # Namespace the per-session staging root by repo + session unless one was passed
+        # explicitly. Keeping agent dirs under <base>/<repo>/<session>/<agent_id> stops a
+        # stale or parallel session from colliding on a bare agent_id dir — the Phase 4
+        # ".done landed in the wrong staging dir" failure.
+        if self.staging_root is _DERIVE_STAGING_ROOT:
+            self.staging_root = self.staging_base / self.repo_name / self.session_id
 
     @property
     def repo_vdb_dir(self) -> Path:
@@ -56,14 +75,21 @@ class ConductorSession:
         return next((a for a in self.agents if a.agent_id == agent_id), None)
 
     def save_manifest(self) -> Path:
-        """Persist this session to ``<staging_root>/session.json`` for ``--resume``."""
-        self.staging_root.mkdir(parents=True, exist_ok=True)
-        path = self.staging_root / SESSION_MANIFEST
+        """Persist this session to ``<staging_base>/session.json`` for ``--resume``.
+
+        Written at the base (not the namespaced staging_root) so resume can locate it
+        without the session_id. Records the resolved staging_base and staging_root so
+        resume reuses the exact paths instead of recomputing tempfile.gettempdir(),
+        which can drift across processes via $TMPDIR.
+        """
+        self.staging_base.mkdir(parents=True, exist_ok=True)
+        path = self.staging_base / SESSION_MANIFEST
         data = {
             "repo_root": str(self.repo_root),
             "repo_name": self.repo_name,
             "session_id": self.session_id,
             "vdb_root": str(self.vdb_root),
+            "staging_base": str(self.staging_base),
             "staging_root": str(self.staging_root),
             "agents": [
                 {
@@ -80,9 +106,14 @@ class ConductorSession:
         return path
 
     @classmethod
-    def from_manifest(cls, staging_root: Path) -> ConductorSession:
-        """Rebuild a session from ``<staging_root>/session.json`` (raises if absent)."""
-        data = json.loads((staging_root / SESSION_MANIFEST).read_text())
+    def from_manifest(cls, staging_base: Path) -> ConductorSession:
+        """Rebuild a session from ``<staging_base>/session.json`` (raises if absent).
+
+        Reuses the persisted (resolved) staging_root verbatim so the rebuilt session
+        watches the exact paths the prompts were baked with — never a recomputed temp
+        dir. Falls back gracefully for manifests written before staging_base existed.
+        """
+        data = json.loads((staging_base / SESSION_MANIFEST).read_text())
         agents = [
             AgentSpec(
                 a["agent_id"],
@@ -99,5 +130,6 @@ class ConductorSession:
             agents=agents,
             session_id=data["session_id"],
             vdb_root=Path(data["vdb_root"]),
+            staging_base=Path(data.get("staging_base", staging_base)),
             staging_root=Path(data["staging_root"]),
         )

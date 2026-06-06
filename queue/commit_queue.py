@@ -115,6 +115,30 @@ def _normalize_repo(repo: str) -> str:
 
 
 # ── Enqueue ───────────────────────────────────────────────────────────────────
+def _validate_file_tokens(files: list[str]) -> None:
+    """Reject file tokens that indicate a malformed --files value.
+
+    --files is shlex-split: space-separated paths inside one quoted string. A comma in
+    a token (or an empty token) almost always means the caller used comma separation or
+    bad quoting, which would otherwise enqueue cleanly and then fail opaquely at
+    ``git add`` in the worker with a confusing pathspec error. Catch it here, at enqueue
+    time, with a message that points at the parsing rule.
+    """
+    for token in files:
+        if not token.strip():
+            raise ValueError(
+                "--files contains an empty/whitespace path token — check the quoting. "
+                "--files is space-separated inside one quoted string (shlex-parsed), "
+                'e.g. --files "a.py b.py".'
+            )
+        if "," in token:
+            raise ValueError(
+                f"--files token {token!r} contains a comma. --files is space-separated "
+                '(shlex-parsed), not comma-separated: use --files "a.py b.py", '
+                'not --files "a.py,b.py". As written this would fail at git add.'
+            )
+
+
 def enqueue(repo: str, files: list[str], message: str, agent_id: str) -> int:
     """Insert a pending commit entry; return its row id."""
     init_db()
@@ -123,6 +147,7 @@ def enqueue(repo: str, files: list[str], message: str, agent_id: str) -> int:
         raise RuntimeError(f"Not a git repository: {repo_path}")
     if not files:
         raise ValueError("Must specify at least one file to commit")
+    _validate_file_tokens(files)
     if not message.strip():
         raise ValueError("Commit message cannot be empty")
 
@@ -456,7 +481,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_enq.add_argument(
         "--files",
         required=True,
-        help="Space-separated explicit file list (shlex-parsed)",
+        action="append",
+        metavar="FILES",
+        help=(
+            'Files to commit, space-separated inside one quoted string (shlex-parsed), '
+            'e.g. --files "a.py b.py". Repeatable: pass --files more than once and the '
+            "values are concatenated. Use spaces, not commas."
+        ),
     )
     p_enq.add_argument("--message", required=True)
     p_enq.add_argument(
@@ -477,7 +508,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if args.cmd == "enqueue":
-        files = shlex.split(args.files)
+        # args.files is a list of --files values (action="append"); shlex-split each and
+        # concatenate so repeated flags accumulate instead of silently keeping the last.
+        files = [tok for chunk in args.files for tok in shlex.split(chunk)]
         entry_id = enqueue(args.repo, files, args.message, args.agent_id)
         print(f"enqueued #{entry_id} repo={_normalize_repo(args.repo)} files={files}")
         return 0
