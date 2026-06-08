@@ -283,6 +283,12 @@ The constraints were mine. The gate chain was my design. The merge token is mine
 # Stop all services
 ./start_all.sh --stop
 ```
+### Queue Status
+
+```bash 
+Python3 ~/Projects/ciwarden/queue/commit_queue.py status --repo ~/your/repo
+
+```
 
 ### Checking gate health
 
@@ -343,6 +349,52 @@ http://localhost:8000/docs
 Full Swagger UI — explore and test all orchestrator endpoints interactively.
 
 ---
+
+# Multi-Agent Session — Quick Start
+
+## 1. Start the stack
+
+```bash
+gatechain
+```
+
+## 2. Wizard inputs
+
+```
+Target repo path: ~/Projects/YourRepo
+How many agents:  N
+```
+
+For each agent enter a short description and paste the prompt.
+End each prompt with a line containing only `.`
+
+## 3. Launch agents
+
+After the wizard completes:
+
+```bash
+bash /var/folders/pm/9dg3b0dj5bnc_j1yfsj0hz800000gn/T/conductor_staging/launch_agents.sh
+```
+
+N Terminal windows open. Each one copies its prompt to clipboard.
+Paste with ⌘V in each window. Walk away.
+
+## 4. Resume after failure
+
+If the session fails before the atomic commit:
+
+```bash
+python3 -m conductor --resume
+```
+
+Rebuilds the session from the existing staging manifest.
+No wizard re-entry. No repasting prompts.
+
+## 5. Stop the stack
+
+```bash
+gatechain-stop
+```
 
 ## Interpreting Gate Output
 

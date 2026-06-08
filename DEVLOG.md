@@ -465,3 +465,454 @@ The Conductor is pre-gate infrastructure. The gates don't know it exists.
 ---
 
 *"Generation is optional. Verification is not."*
+
+---
+
+## June 1, 2026 — Project Rebrand, Clipboard-Driven Conductor & Multi-Agent Resume Flow
+
+# CIWarden Refactor & Interactive Multi-Agent Orchestration
+
+## Overview
+
+This session focused on formalizing the evolution of the local testing wrapper into a unified governance framework: **CIWarden**. Documentation boundaries, service titles, hook banners, and operational terminology were aligned under this identity to reinforce the project's hard-enforcement philosophy.
+
+Additionally, a critical packaging issue was resolved by removing a stray repository-root `__init__.py` file. During test execution, pytest incorrectly traversed the package chain beyond the repository root, causing the parent directory to be inserted into `sys.path` and resulting in:
+
+```text
+ModuleNotFoundError: No module named 'gates'
+```
+
+Removing the file restored proper package resolution and stabilized the test gate.
+
+---
+
+# What Was Designed & Implemented
+
+## Anthropic SDK Dependency Removal
+
+Following the v3 optimization of the Generational Memory Gate, which now utilizes the local static AST parser (`SchemaCaptureClient`), the network-bound Anthropic SDK became unnecessary.
+
+Changes:
+
+- Removed `anthropic` from runtime dependencies.
+- Removed associated `ignore_missing_imports` overrides from the mypy configuration.
+- Eliminated unused network coupling within gate execution paths.
+- Reduced dependency surface area and simplified deployment requirements.
+
+---
+
+## Interactive Conductor Layout & Clipboard Workflow
+
+To support restricted execution environments where direct stdin piping into `claude -p` is unreliable or incompatible with Claude Max sessions, the multi-agent spawning workflow was redesigned around an interactive clipboard-driven architecture.
+
+### Conductor Wizard Simplification
+
+The setup flow was reduced to two required inputs:
+
+- Description
+- Prompt
+
+The `module_key` is now derived automatically from the description, eliminating redundant subsystem prompts.
+
+### Launch Script Generation
+
+`distributor.write_launch_script()` now generates:
+
+```text
+<staging_root>/launch_agents.sh
+```
+
+The launch script:
+
+- Uses AppleScript (`osascript`) to spawn parallel Terminal windows.
+- Arranges agent sessions side-by-side.
+- Launches each agent in its own isolated staging directory.
+
+### Clipboard-Based Prompt Injection
+
+Each terminal executes an interactive startup sequence that:
+
+```bash
+cat PROMPT.md | pbcopy
+```
+
+and then:
+
+1. Copies the agent-specific prompt directly to the macOS clipboard.
+2. Displays a paste instruction.
+3. Launches:
+
+```bash
+claude --dangerously-skip-permissions
+```
+
+The operator manually pastes (`⌘V`) the prompt into each active Claude session.
+
+This approach avoids stdin transport limitations while preserving full parallel-agent orchestration.
+
+---
+
+## Staging Manifest & Session Resumption
+
+A robust session recovery mechanism was introduced through:
+
+```bash
+python3 -m conductor --resume
+```
+
+### Session Persistence
+
+During distribution, orchestration state is serialized to:
+
+```text
+<staging_root>/session.json
+```
+
+The manifest captures:
+
+- Repository path constraints
+- Agent assignments
+- Orchestration metadata
+- Runtime configuration
+
+### Resume Workflow
+
+When `--resume` is specified, Conductor:
+
+- Skips the setup wizard entirely.
+- Bypasses `distribute()`.
+- Prevents prompt regeneration.
+- Preserves existing schemas.
+- Preserves active agent state.
+
+Before resuming execution it:
+
+1. Validates staging tree integrity.
+2. Removes stale `.done` tracking files.
+3. Regenerates `launch_agents.sh`.
+4. Re-enters the blocking orchestration wait state.
+
+This enables immediate recovery from interrupted runs without losing agent progress or mutating staging artifacts.
+
+---
+
+## Two-Tier Commit Log Automation
+
+The foundation was established for automated development-log generation through a non-blocking append-only synchronization pipeline.
+
+### Commit Log Synchronization
+
+A new script:
+
+```text
+scripts/update_commit_log.py
+```
+
+collects data from:
+
+- `gate_results.db`
+- Git metadata
+
+and appends idempotent JSON Lines entries to:
+
+```text
+.cdmad/commit_log.jsonl
+```
+
+### Devlog Generation
+
+A companion script:
+
+```text
+scripts/write_devlog_entry.py
+```
+
+generates Markdown development log skeletons from unconsumed entries using a configurable:
+
+```bash
+--since
+```
+
+boundary.
+
+### Hook Integration
+
+The synchronization pipeline is integrated as a best-effort side effect within:
+
+```text
+hooks/pre_commit.py
+```
+
+Execution occurs only after successful issuance of a cryptographic merge token.
+
+A corresponding post-commit hook captures and records the finalized Git `HEAD` hash to maintain continuity between gate results, merge authorization, and repository history.
+
+---
+
+# Outcome
+
+This work completes a major architectural transition toward CIWarden as a unified governance platform while simultaneously improving:
+
+- Dependency hygiene
+- Test reliability
+- Multi-agent orchestration resilience
+- Session recoverability
+- Commit-history observability
+- Automated development logging
+
+The resulting system is significantly more robust in constrained execution environments and establishes the infrastructure necessary for future automation of orchestration reporting and governance workflows.
+
+---
+
+### Commits This Session
+
+| SHA | Message | Gates | Total |
+|-----|---------|-------|-------|
+| `37963f3` | docs(readme): remove --no-verify subsection | ✓ 7/7 | 42845ms |
+| `b1add7d` | feat(devlog): two-tier commit-log automation | ✓ 7/7 | 43216ms |
+| `d9d502f` | feat(hooks): add best-effort post-commit hook for the commit log | ✓ 7/7 | 44540ms |
+| `19876d2` | chore: rename project from CI Gate Wrapper to CIWarden | ✓ 7/7 | 44111ms |
+| `f818957` | fix(tests): remove stray repo-root __init__.py breaking pytest collection | ✓ 7/7 | 44280ms |
+| `813ce15` | chore(deps): drop anthropic from project dependencies | ✓ 7/7 | 44059ms |
+| `6513fdd` | chore(deps): drop anthropic from mypy import-override list | ✓ 7/7 | 43795ms |
+| `adeba56` | feat(conductor): launch_agents.sh generator + two-field wizard | ✓ 7/7 | 45142ms |
+| `946d77d` | fix(conductor): launch script copies prompt to clipboard, runs claude interactively | ✓ 7/7 | 44307ms |
+| `9555b5c` | feat(conductor): --resume flag to relaunch from existing staging | ✓ 7/7 | 44822ms |
+| `d69db2d` | docs(readme): add Conductor --resume usage section | ✓ 7/7 | 44335ms |
+
+---
+
+### Gate Summary
+
+| Gate | Fastest | Slowest | Runs |
+|------|---------|---------|------|
+| lint | 16ms | 103ms | 11 |
+| typecheck | 691ms | 1508ms | 11 |
+| security | 794ms | 1239ms | 11 |
+| memory | 309ms | 578ms | 11 |
+| test | 9879ms | 11659ms | 11 |
+| stress | 30477ms | 30569ms | 11 |
+| build | 148ms | 212ms | 11 |
+
+---
+
+### Merge Tokens
+
+e501df5b3b3befa771e21bfa
+6c999dc5b29d28f07087b4b0
+2fdefe8703b1c6cc8660b11b
+d715d19b154fc73f452f9080
+600ba4f4107ad899921c9a3a
+8d407e54d2de79ef7f2dce3e
+df01ffd9d666ad53bec83a96
+0bf2ca7c031cb258ed31a40a
+b207f708fa2ea584fe5c1f5e
+168e141bdc0dd936cca7fa30
+2b7a021e99f86ba86cf04b02
+
+---
+
+
+---
+
+## June 8, 2026 — Hardening the Post-Launch Flow & Process Autonomy
+
+# CIWarden Runtime Hardening & Autonomous Queue Orchestration
+
+## Overview
+
+This session focused on closing critical edge-case vulnerabilities within the Conductor's multi-agent runtime and branch coordination systems. The primary objective was to eliminate state-engine hangs, strengthen staging isolation guarantees, and ensure agent activity cannot bypass orchestration controls.
+
+In parallel, the project was formally re-licensed under the **Apache License 2.0**, establishing a standardized open-source licensing framework for future development and distribution.
+
+---
+
+# What Was Designed & Implemented
+
+## Post-Launch Flow Termination Fixes
+
+Two critical defects affecting session state synchronization and execution reliability were identified and resolved.
+
+### Vacuous / Stale Handoff Protection
+
+A flaw existed where the Conductor could prematurely transition into proofing under two conditions:
+
+- The staging workspace contained no active agent signals.
+- A previous session left behind stale `.done` markers.
+
+Under these circumstances, `run_session()` could incorrectly assume all work had completed and immediately advance to proofing before active agents finished generation.
+
+The execution engine now:
+
+- Explicitly protects against empty execution states.
+- Clears stale `.done` markers before entering the polling loop.
+- Guarantees synchronization occurs only against valid active-session signals.
+
+This prevents premature proofing and restores deterministic session completion behavior.
+
+---
+
+### Staging Escape Recovery
+
+A second failure mode occurred when an agent wrote directly into the destination repository rather than its assigned staging workspace.
+
+Previously, this caused:
+
+```python
+RuntimeError("no staged files")
+```
+
+to be raised by `atomic_commit()`, terminating the orchestration thread.
+
+The commit path was hardened to:
+
+- Detect staging escape conditions.
+- Safely copy staged assets before finalization.
+- Return a clean empty-result exit path.
+- Emit operational warnings instead of crashing the runtime.
+
+This transforms a fatal runtime failure into a recoverable operational condition.
+
+---
+
+## Staging Constraints & Soft Signal Detection
+
+To further reduce repository contamination risk, staging controls were strengthened at both the prompt and orchestration layers.
+
+### Reinforced Staging Directives
+
+The distribution prompt architecture now includes an explicit high-priority directive instructing agents to:
+
+- Operate exclusively within assigned staging paths.
+- Avoid direct mutations against target repositories.
+- Treat staging workspaces as the sole authorized write boundary.
+
+---
+
+### Soft Signal Recovery Path
+
+While prompt-level controls reduce violations, model behavior can occasionally produce unintended writes.
+
+To prevent indefinite orchestration hangs in these scenarios:
+
+`wait_for_done()` now monitors the repository for untracked additions matching an agent's `module_key`.
+
+When detected:
+
+1. A warning is logged.
+2. The execution block is released.
+3. The pipeline advances to proofing.
+
+Rather than waiting forever for a completion signal that may never arrive, the system treats repository mutations as a **soft completion signal** and continues execution.
+
+This preserves forward progress while maintaining operator visibility into staging violations.
+
+---
+
+## Autonomous Detached Worker Queuing
+
+The commit pipeline was extended to support fully autonomous queue consumption without operator intervention.
+
+### Repository-Aware Worker Discovery
+
+The queue worker management system is now directly coupled to target repository lifecycles.
+
+Upon successful multi-agent session completion:
+
+- `ensure_worker()` inspects the host system using `pgrep`.
+- Active queue workers are searched specifically for the target repository.
+- Repository-scoped workers are treated independently from the CIWarden orchestration environment.
+
+Example target repository:
+
+```text
+session.repo_root
+```
+
+such as a downstream project workspace.
+
+---
+
+### Automatic Worker Provisioning
+
+If no active worker is detected:
+
+- A detached background daemon is launched automatically.
+- Queue processing begins immediately.
+- The worker operates independently of the Conductor session lifecycle.
+
+Successful startup is recorded with:
+
+```text
+CONDUCTOR ● queue worker started for {repo_name}
+```
+
+This guarantees commit queues continue draining after orchestration completes, eliminating the need for manual worker startup procedures.
+
+---
+
+## Apache 2.0 License Adoption
+
+The codebase was formally transitioned to the Apache License 2.0 standard.
+
+Benefits include:
+
+- Explicit patent grants.
+- Commercial-use compatibility.
+- Contribution clarity.
+- Industry-standard open-source governance.
+
+This establishes a clear legal framework for external contributors, enterprise adoption, and future ecosystem growth.
+
+---
+
+# Audit Resolution
+
+The session concluded with remediation of four critical Phase 4 audit discrepancies.
+
+These fixes finalized consistency guarantees across:
+
+- Runtime state management
+- Session termination behavior
+- Staging enforcement
+- Queue processing lifecycle coordination
+
+The resulting system significantly improves orchestration reliability, fault tolerance, and autonomous operation while ensuring repository boundaries remain protected throughout the multi-agent execution lifecycle.
+
+---
+
+### Commits This Session
+
+| SHA | Message | Gates | Total |
+|-----|---------|-------|-------|
+| `5ddbec7` | fix(conductor): wait for fresh .done before proofing; commit empty-staging gracefully | ✓ 7/7 | 44036ms |
+| `f1fefaa` | docs(readme): relicense under Apache 2.0; add LICENSE file | ✓ 7/7 | 44718ms |
+| `b9895ac` | fix(conductor): auto-start queue worker on commit; soft-signal repo writes | ✓ 7/7 | 44620ms |
+| `982b263` | fix(conductor,queue): repair Phase 4 audit failures | ✓ 7/7 | 44292ms |
+
+---
+
+### Gate Summary
+
+| Gate | Fastest | Slowest | Runs |
+|------|---------|---------|------|
+| lint | 30ms | 81ms | 4 |
+| typecheck | 638ms | 982ms | 4 |
+| security | 882ms | 981ms | 4 |
+| memory | 390ms | 418ms | 4 |
+| test | 10965ms | 11758ms | 4 |
+| stress | 30467ms | 30517ms | 4 |
+| build | 140ms | 207ms | 4 |
+
+---
+
+### Merge Tokens
+
+49288f1d6b5d5d6506341200
+d08c8df4dd2fdbf3e30176bb
+54ee46f315bcfbd3aa6d2f48
+e527ae169208f879fc8c3ebb
+
+---
+
+*"Generation is optional. Verification is not."*
