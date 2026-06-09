@@ -243,27 +243,91 @@ def _read_multiline(end_marker: str = ".") -> str:
     return "\n".join(lines)
 
 
+def _resolve_repo(value: str, repo_paths: dict[str, str]) -> str:
+    """Resolve an operator-entered repo value to a repo *name*, recording its path.
+
+    The AgentSpec stores a repo *name* and the router keys on it, with the
+    name → path map living in ``repo_paths``. This turns whatever the operator typed
+    into that name:
+
+    * A value that is already a path (starts with ``/`` or ``~``) is used as-is — the
+      operator gave the full location, so no redundant "Path to X repo" prompt. The
+      path is resolved and its repo name derived from it.
+    * A short name (e.g. ``GolemLinux``) prompts once for the path; later agents naming
+      the same repo reuse it without re-prompting.
+    """
+    if value.startswith(("/", "~")):
+        path = Path(value).expanduser().resolve()
+        name = _get_repo_name(path)
+        repo_paths.setdefault(name, str(path))
+        return name
+    if value not in repo_paths:
+        rpath = input(f"  Path to {value} repo: ").strip()
+        repo_paths[value] = str(Path(rpath).expanduser().resolve())
+    return value
+
+
+def _parse_agent_numbers(raw: str, count: int) -> list[int]:
+    """Parse ``'2,4 6'`` into ``[2, 4, 6]``, keeping only in-range, de-duplicated numbers."""
+    numbers: list[int] = []
+    for token in raw.replace(",", " ").split():
+        try:
+            n = int(token)
+        except ValueError:
+            _log(f"  skipping '{token}' — not a number")
+            continue
+        if not (1 <= n <= count):
+            _log(f"  skipping {n} — no such agent (1-{count})")
+        elif n not in numbers:
+            numbers.append(n)
+    return numbers
+
+
+def _collect_repo_overrides(count: int, repo_paths: dict[str, str]) -> dict[int, str]:
+    """Ask which agent numbers use a non-default repo; return agent number → repo name.
+
+    Collected up front (rather than mid-prompt for every agent) so the common case —
+    every agent on the default repo — asks nothing per agent. Each named agent's repo
+    value goes through :func:`_resolve_repo`, so a full path is used as-is and a short
+    name prompts once for its path.
+    """
+    raw = input("  Which agent numbers? (e.g. 2,4): ").strip()
+    overrides: dict[int, str] = {}
+    for n in _parse_agent_numbers(raw, count):
+        value = input(f"  [agent_{n:03d}] repo: ").strip()
+        if value:
+            overrides[n] = _resolve_repo(value, repo_paths)
+    return overrides
+
+
 def wizard() -> ConductorSession:
     repo_root = Path(input("Target repo path: ").strip() or ".").expanduser().resolve()
     repo_name = _get_repo_name(repo_root)
     _log(f"CONDUCTOR — repo: {repo_name} ({repo_root})")
 
     count = _ask_int(f"How many agents? (1-{MAX_AGENTS})", 1, MAX_AGENTS)
-    agents: list[AgentSpec] = []
     repo_paths: dict[str, str] = {}
+
+    # Global default repo, asked once. Enter keeps the target repo (routed as "default",
+    # the invoking repo) for every agent — the common single-repo case, identical to the
+    # pre-upgrade behavior. Naming a different repo here makes it every agent's default.
+    default_value = input(f"Default repo for all agents [{repo_name}]: ").strip()
+    global_default_repo = _resolve_repo(default_value, repo_paths) if default_value else "default"
+
+    # Per-agent overrides, collected up front. If no agent differs we skip per-agent repo
+    # prompts entirely.
+    overrides: dict[int, str] = {}
+    if input("Any agents use a different repo? (y/n): ").strip().lower() == "y":
+        overrides = _collect_repo_overrides(count, repo_paths)
+
+    agents: list[AgentSpec] = []
     for i in range(1, count + 1):
         agent_id = f"agent_{i:03d}"
         description = input(f"  [{agent_id}] description (e.g. 'memory allocator'): ").strip()
         module_key = module_key_from_description(description)
         _log(f"  [{agent_id}] prompt (end with a line containing only '.'):")
         prompt = _read_multiline()
-        # New: per-agent target repo. Pressing Enter keeps "default" (the invoking repo)
-        # and asks nothing further — identical to the pre-upgrade wizard. Naming a repo
-        # prompts once for its path, reused for every later agent on the same repo.
-        repo = input(f"  [{agent_id}] repo [default]: ").strip() or "default"
-        if repo != "default" and repo not in repo_paths:
-            rpath = input(f"  Path to {repo} repo: ").strip()
-            repo_paths[repo] = str(Path(rpath).expanduser().resolve())
+        repo = overrides.get(i, global_default_repo)
         agents.append(AgentSpec(agent_id, description, prompt, module_key, repo=repo))
 
     _log(f"\nLaunch {count} agents on {repo_name}? [y/N]")

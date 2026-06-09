@@ -50,14 +50,19 @@ class RepoRouter:
 
     def __init__(self, default_repo_path: Path):
         self.repos: dict[str, RepoContext] = {}
-        self.default_repo_path = Path(default_repo_path)
+        self.default_repo_path = self._normalize(default_repo_path)
         # Always register the default repo so get_repo_for_agent always resolves.
         self._register(DEFAULT_REPO, self.default_repo_path)
 
     def register(self, repo_name: str, repo_path: Path) -> None:
-        """Register a repo by name. Idempotent — re-registering is a no-op."""
+        """Register a repo by name. Idempotent — re-registering is a no-op.
+
+        The path is normalized via :meth:`_normalize` so it is stored canonically
+        (``~`` expanded, symlinks and case folded). Idempotency keys on
+        ``repo_name``, so the same repo under two path spellings only registers once.
+        """
         if repo_name not in self.repos:
-            self._register(repo_name, Path(repo_path))
+            self._register(repo_name, repo_path)
 
     def assign_agent(self, agent_id: str, repo_name: str) -> None:
         """Assign an agent to a repo. Called during session setup.
@@ -123,7 +128,19 @@ class RepoRouter:
     # ── internals ────────────────────────────────────────────────────────────
 
     def _register(self, name: str, path: Path) -> None:
-        self.repos[name] = RepoContext(name=name, path=Path(path))
+        self.repos[name] = RepoContext(name=name, path=self._normalize(path))
+
+    @staticmethod
+    def _normalize(path: Path) -> Path:
+        """Canonicalize a repo path so every later comparison sees one spelling.
+
+        macOS filesystems are case-insensitive and route through symlinks
+        (``/tmp`` → ``/private/tmp``, ``/Users/x`` vs ``/Users/X``), so two strings
+        can name the same repo. Expanding ``~`` and resolving symlinks/case once at
+        registration time means queue routing and worker detection always operate on
+        the canonical path — no per-comparison normalization, no near-miss mismatches.
+        """
+        return Path(path).expanduser().resolve()
 
     @staticmethod
     def _build_enqueue_cmd(
@@ -152,11 +169,13 @@ class RepoRouter:
         """True if a queue worker process is draining ``repo_path``.
 
         Mirrors ``conductor.commit._worker_running``: matches the worker command line
-        via ``pgrep -f`` against the resolved repo path, so a worker started by
+        via ``pgrep -f`` against the normalized repo path, so a worker started by
         start_all.sh, the CLI, or a prior Conductor run is detected the same way.
-        Returns False if pgrep is unavailable — the caller only warns, never blocks.
+        Both sides are run through :meth:`_normalize` so case/symlink differences
+        never hide a running worker. Returns False if pgrep is unavailable — the
+        caller only warns, never blocks.
         """
-        pattern = f"commit_queue.py worker --repo {Path(repo_path).resolve()}"
+        pattern = f"commit_queue.py worker --repo {RepoRouter._normalize(repo_path)}"
         try:
             result = subprocess.run(  # noqa: S603 — fixed argv, no shell
                 ["pgrep", "-f", pattern],
