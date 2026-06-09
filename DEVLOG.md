@@ -916,3 +916,132 @@ e527ae169208f879fc8c3ebb
 ---
 
 *"Generation is optional. Verification is not."*
+
+---
+
+## June 9, 2026 — {title placeholder}
+
+# Conductor v2 — DAG Upgrade + Multi-Repo Routing
+
+**Date:** June 9, 2026
+**Branch:** v1.1
+**Commits:** `3272a0a`, `0891d62`
+**Merge tokens:** `a20ad14752021a88e2676976`, `4abbbc96cf1990c7eca89eb1`
+**Lines changed:** +2109 / -40
+**Gate results:** 7/7 both commits
+
+---
+
+## What Changed
+
+Two new files. Two modified files. The Conductor grew to match the complexity of the problems it now needs to solve.
+
+`dag.py` — new. `DAGBuilder` parses the `CONTRACTS_CONSUMED` block from every agent prompt and builds a dependency graph. Cycle detection. Topological ordering. `ready_agents()` returns only agents whose declared dependencies have signaled `.done`. The dependency information was already in the prompts — this is the layer that reads it.
+
+`router.py` — new. `RepoRouter` holds one `RepoContext` per repo involved in a session. Routes each agent's commit queue entry to the correct repo's worker. Two repos active simultaneously means two queue workers, two atomic commits, one session.
+
+`distributor.py` — modified. The `.done` polling loop is now dependency-aware. Agents launch when their dependencies clear, not when the session starts. The backward compatibility gate is explicit and non-negotiable — sessions with no `CONTRACTS_CONSUMED` declarations take the old path byte-for-byte.
+
+`commit.py` — modified. `atomic_commit_multi_repo()` fires commits in topological order across all repos. Producer repos commit before dependent repos. VDB committed once before any queue entry.
+
+`cli.py` — modified. Wizard gains a per-agent repo field. DAG is built after wizard completes, before any agent launches. Dependency summary printed for operator visibility.
+
+25 new tests. 316 passing total.
+
+---
+
+## Why This Session Happened
+
+The Sentinel v3 build has eight agents across two repos — `sentinel` and `GolemLinux`. The current Conductor launches all agents simultaneously. Agent 4 cannot start until Agent 3 has produced a type that Agent 4 consumes. Agent 7 cannot start until Agents 3, 5, and 6 are all done. The current Conductor has no way to enforce any of that.
+
+The answer was not to build a separate "Wave Orchestrator" module. That was the first instinct — a new layer sitting above the Conductor, managing waves, watching `.done` files, queueing dependent agents. The right answer became clear quickly: that's just the Conductor doing what a conductor actually does.
+
+A real conductor doesn't wave everyone in at once and hope for the best. It cues each section when it's their turn.
+
+The DAG awareness and multi-repo routing aren't new features bolted on. They're what the Conductor should have been from the start. The v1 Conductor was simpler because the sessions were simpler — one repo, loosely coupled agents. Now the sessions are more complex and the Conductor grows to match.
+
+---
+
+## The Moment That Earned a Devlog Entry
+
+The session ran the Conductor upgrade under the current Conductor. Two agents. One dependency: Agent 2 could not start until Agent 1 signaled `.done`.
+
+Agent 2 polled for Agent 1's `.done` file. Found it. Read Agent 1's actual produced code — not the spec pseudocode — and caught three real integration details before writing a single line:
+
+- `agent_by_id` not `get_agent`
+- `repo_root` not `repo_path`
+- No `prompt_path` field on `AgentSpec`
+
+Without the dependency gate, Agent 2 would have written against the spec and produced code that didn't compile against Agent 1's actual implementation. The gate caught the mismatch before it became a problem.
+
+**The first dependency the upgraded Conductor enforced was its own.**
+
+The Conductor upgraded itself under its own governance, using the dependency ordering it was in the process of gaining. That is not a coincidence. That is what the system is for.
+
+---
+
+## Gate Chain Notes
+
+The commit did not go in cleanly on first attempt. Three typecheck errors in Agent 2's test files — missing `-> None` annotations on `fake_run` helpers, a `cast(list[str], ...)` that needed TC006 quoting, and a `files: list[str]` annotation missing on the return capture from `atomic_commit_multi_repo()`.
+
+All mechanical. No logic changes. Fixed manually after the gate blocked.
+
+The 10 bandit B603/B607 findings are intentional and pre-existing — subprocess without `shell=True` is the correct pattern for invoking CLI tools by name. Whitelisted in `pyproject.toml`. Not introduced this session.
+
+---
+
+## What's Next
+
+The Conductor upgrade is the unlock. It runs Sentinel v3 — eight agents, two repos, dependency ordering enforced automatically.
+
+After Sentinel v3: CDWarden. After CDWarden: the platform wrapper.
+
+The full sequence:
+
+```
+✓ Conductor DAG upgrade         this session
+→ Sentinel v3                   8 agents, upgraded Conductor, sentinel + GolemLinux
+→ CDWarden                      new Rust workspace, delivery governance layer
+→ Platform                      Electron wrapper, DMG/NSIS/AppImage, the product
+```
+
+The Big 3 spec is documented in `THE_BIG_3_SPEC.md`.
+
+---
+
+*CIWarden v1.1 — feat(conductor): DAG upgrade + multi-repo routing*
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*
+
+---
+
+### Commits This Session
+
+| SHA | Message | Gates | Total |
+|-----|---------|-------|-------|
+| `3272a0a` | updated DEVLOG.md and README.md | ✓ 7/7 | 43943ms |
+| `0891d62` | feat(conductor): DAG upgrade + multi-repo routing + lint/typecheck fixes | ✓ 7/7 | 54519ms |
+
+---
+
+### Gate Summary
+
+| Gate | Fastest | Slowest | Runs |
+|------|---------|---------|------|
+| lint | 66ms | 85ms | 2 |
+| typecheck | 971ms | 10807ms | 2 |
+| security | 928ms | 1174ms | 2 |
+| memory | 477ms | 569ms | 2 |
+| test | 10785ms | 11104ms | 2 |
+| stress | 30528ms | 30537ms | 2 |
+| build | 188ms | 243ms | 2 |
+
+---
+
+### Merge Tokens
+
+a20ad14752021a88e2676976
+4abbbc96cf1990c7eca89eb1
+
+---
+
+*"Generation is optional. Verification is not."*
