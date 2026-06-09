@@ -7,6 +7,10 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from conductor.dag import DependencyNode
 
 # Spec-mandated staging base; tempfile.gettempdir() resolves to /tmp on POSIX while
 # staying portable and avoiding a hardcoded /tmp literal. Resolved once here so the
@@ -43,6 +47,32 @@ class AgentSpec:
     module_key: str             # schema/VDB key, derived from description, e.g. "memory_allocator"
     dependencies: list[str] = field(default_factory=list)  # module_keys this agent depends on
 
+    # ── DAG / multi-repo upgrade fields (additive; all defaulted) ──────────────
+    # Every field below has a default so existing positional construction
+    # (agent_id, description, prompt, module_key[, dependencies]) is unaffected.
+
+    repo: str = "default"
+    # The repo this agent writes to. Matches a key in the router's repo registry.
+    # Default "default" = the repo the Conductor was invoked from.
+    # Set by the wizard when the operator specifies a target repo for this agent.
+    # Examples: "sentinel", "GolemLinux", "ciwarden".
+
+    depends_on: list[str] = field(default_factory=list)
+    # Populated by DAGBuilder.build() after the wizard completes — not entered by the
+    # operator. List of agent_ids this agent must wait for before launching, derived
+    # from the prompt's CONTRACTS_CONSUMED block. Distinct from ``dependencies`` above,
+    # which holds module_keys for the VDB/proofing layer.
+
+    state: str = "waiting"
+    # Current state in the per-agent state machine.
+    # Values: waiting | ready | running | done | failed | blocked
+    #   "waiting" = dependencies not yet satisfied
+    #   "ready"   = dependencies satisfied, not yet launched
+    #   "running" = terminal open, agent active
+    #   "done"    = .done signal received, output clean
+    #   "failed"  = PeerChecker conflict, retry available
+    #   "blocked" = a dependency failed, cannot proceed
+
     def staging_dir(self, staging_root: Path) -> Path:
         return staging_root / self.agent_id
 
@@ -58,6 +88,16 @@ class ConductorSession:
     vdb_root: Path = DEFAULT_VDB_ROOT
     staging_base: Path = DEFAULT_STAGING_ROOT
     staging_root: Path = _DERIVE_STAGING_ROOT
+
+    # ── DAG / multi-repo upgrade fields (additive; all defaulted) ──────────────
+    dag: dict[str, DependencyNode] = field(default_factory=dict)
+    # Populated after the wizard completes: {agent_id: DependencyNode}.
+    # Serialized to the session manifest for --resume support. DependencyNode holds
+    # only strings and lists of strings, so it round-trips through JSON cleanly.
+
+    multi_repo: bool = False
+    # True if any agent in the session has repo != "default". Set automatically when the
+    # DAG is built. Signals to distributor.py and commit.py that router.py is needed.
 
     def __post_init__(self) -> None:
         # Namespace the per-session staging root by repo + session unless one was passed
@@ -91,6 +131,7 @@ class ConductorSession:
             "vdb_root": str(self.vdb_root),
             "staging_base": str(self.staging_base),
             "staging_root": str(self.staging_root),
+            "multi_repo": self.multi_repo,
             "agents": [
                 {
                     "agent_id": a.agent_id,
@@ -98,9 +139,20 @@ class ConductorSession:
                     "prompt": a.prompt,
                     "module_key": a.module_key,
                     "dependencies": a.dependencies,
+                    "repo": a.repo,
+                    "depends_on": a.depends_on,
+                    "state": a.state,
                 }
                 for a in self.agents
             ],
+            "dag": {
+                node_id: {
+                    "agent_id": node.agent_id,
+                    "depends_on": node.depends_on,
+                    "required_by": node.required_by,
+                }
+                for node_id, node in self.dag.items()
+            },
         }
         path.write_text(json.dumps(data, indent=2))
         return path
@@ -111,8 +163,11 @@ class ConductorSession:
 
         Reuses the persisted (resolved) staging_root verbatim so the rebuilt session
         watches the exact paths the prompts were baked with — never a recomputed temp
-        dir. Falls back gracefully for manifests written before staging_base existed.
+        dir. Falls back gracefully for manifests written before the DAG/multi-repo and
+        staging_base fields existed: every new field is read with a default.
         """
+        from conductor.dag import DependencyNode
+
         data = json.loads((staging_base / SESSION_MANIFEST).read_text())
         agents = [
             AgentSpec(
@@ -121,9 +176,20 @@ class ConductorSession:
                 a["prompt"],
                 a["module_key"],
                 list(a.get("dependencies", [])),
+                repo=a.get("repo", "default"),
+                depends_on=list(a.get("depends_on", [])),
+                state=a.get("state", "waiting"),
             )
             for a in data["agents"]
         ]
+        dag = {
+            node_id: DependencyNode(
+                agent_id=node["agent_id"],
+                depends_on=list(node.get("depends_on", [])),
+                required_by=list(node.get("required_by", [])),
+            )
+            for node_id, node in data.get("dag", {}).items()
+        }
         return cls(
             repo_root=Path(data["repo_root"]),
             repo_name=data["repo_name"],
@@ -132,4 +198,6 @@ class ConductorSession:
             vdb_root=Path(data["vdb_root"]),
             staging_base=Path(data.get("staging_base", staging_base)),
             staging_root=Path(data["staging_root"]),
+            dag=dag,
+            multi_repo=bool(data.get("multi_repo", False)),
         )

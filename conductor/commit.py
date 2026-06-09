@@ -8,6 +8,11 @@ commits git itself.
 
 Ordering is critical: the VDB ``commit_session`` MUST precede the queue entry, so the
 managed-mode memory gate reads the committed session (N vs N-1), not stale state.
+
+For multi-repo sessions, :func:`atomic_commit_multi_repo` fans the file copy and queue
+entries out across repos in *topological order* — a producer's repo commits before its
+consumers' — while still committing the VDB corpus once, before any queue entry, so the
+N-vs-N-1 ordering guarantee holds across the whole session.
 """
 
 from __future__ import annotations
@@ -20,12 +25,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from conductor import distributor
+from conductor.dag import DAGBuilder
 from conductor.vdb_io import store_for
 from memory.schema_capture import SchemaCaptureClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from conductor.router import RepoRouter
     from conductor.session import ConductorSession
     from memory.models import ContractSummary
 
@@ -83,16 +90,15 @@ def _worker_running(repo_root: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
-def ensure_worker(session: ConductorSession) -> bool:
-    """Start a detached queue worker for the target repo if none is running.
+def _ensure_worker_for_path(repo_root: Path, repo_name: str) -> bool:
+    """Start a detached queue worker for ``repo_root`` if none is running.
 
-    The worker MUST point at the target repo (``session.repo_root``), not the ciwarden
-    repo — it owns the git index there, performs the single commit, and drives the gate
-    chain. It is detached (``start_new_session``) so it outlives this Conductor process
-    and keeps draining the queue. Returns True if a worker was started, False if one was
-    already running. Logs ``CONDUCTOR  ● queue worker started for {repo_name}`` on launch.
+    The path-based core behind :func:`ensure_worker`. Shared so multi-repo commits can
+    start a worker for every repo, not just the session's primary one. The worker is
+    detached (``start_new_session``) so it outlives this Conductor process and keeps
+    draining the queue. Returns True if a worker was started, False if one already ran.
     """
-    repo_root = session.repo_root.resolve()
+    repo_root = repo_root.resolve()
     if _worker_running(repo_root):
         return False
 
@@ -107,8 +113,18 @@ def ensure_worker(session: ConductorSession) -> bool:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
-    _log(f"CONDUCTOR  ● queue worker started for {session.repo_name}")
+    _log(f"CONDUCTOR  ● queue worker started for {repo_name}")
     return True
+
+
+def ensure_worker(session: ConductorSession) -> bool:
+    """Start a detached queue worker for the target repo if none is running.
+
+    The worker MUST point at the target repo (``session.repo_root``), not the ciwarden
+    repo — it owns the git index there, performs the single commit, and drives the gate
+    chain. Returns True if a worker was started, False if one was already running.
+    """
+    return _ensure_worker_for_path(session.repo_root, session.repo_name)
 
 
 def assemble_summaries(session: ConductorSession) -> list[ContractSummary]:
@@ -144,6 +160,9 @@ def atomic_commit(session: ConductorSession, *, cleanup: bool = True) -> list[st
     staging — when the agents produced no staged files (e.g. they wrote directly to
     the repo instead of their staging dirs). This never raises on an empty session;
     the caller decides how to surface it.
+
+    Single-repo path; unchanged. Multi-repo sessions use
+    :func:`atomic_commit_multi_repo`.
     """
     enqueue = _load_enqueue()
 
@@ -180,6 +199,125 @@ def atomic_commit(session: ConductorSession, *, cleanup: bool = True) -> list[st
         shutil.rmtree(session.staging_root)
 
     return files
+
+
+# ── Multi-repo commit ─────────────────────────────────────────────
+
+
+def _copy_agents_to_repo(
+    session: ConductorSession, agent_ids: list[str], repo_root: Path,
+) -> list[str]:
+    """Copy the named agents' staged files into ``repo_root``. Returns repo-relative paths.
+
+    The per-repo analogue of :func:`copy_staged_to_worktree`: only the given agents'
+    files are copied, and they land under ``repo_root`` (which may be a repo other than
+    the session's primary one). Files are de-duplicated and sorted for a stable entry.
+    """
+    copied: list[str] = []
+    for agent_id in agent_ids:
+        agent = session.agent_by_id(agent_id)
+        if agent is None:
+            continue
+        adir = distributor.staging_dir(session, agent)
+        for rel in distributor.collect_files(session, agent):
+            src = adir / rel
+            dst = repo_root / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied.append(rel)
+    return sorted(set(copied))
+
+
+def atomic_commit_multi_repo(
+    session: ConductorSession, router: RepoRouter, *, cleanup: bool = True,
+) -> list[str]:
+    """Commit all agents' outputs across all repos, in topological order.
+
+    Ordering guarantees:
+
+    * dependencies commit before dependents — repos are visited in the topological
+      order of their *first* agent, so a producer's repo is enqueued before any repo
+      that consumes from it;
+    * within a wave (same dependency depth) ordering is deterministic — alphabetical by
+      agent_id, inherited from ``DAGBuilder.topological_order``;
+    * each repo receives exactly ONE queue entry covering all its agents' files.
+
+    The VDB corpus is committed once, before any queue entry (preserving the N-vs-N-1
+    ordering the managed memory gate relies on). Returns the full committed file list
+    across every repo, or an empty list if no agent staged anything.
+    """
+    builder = DAGBuilder()
+    topo_order = builder.topological_order(session.dag)
+
+    # Group agents by repo, preserving topological order within and across repos. A repo
+    # first appears at its earliest-in-topo agent, so root-only repos lead.
+    repo_order: list[str] = []
+    repo_agents: dict[str, list[str]] = {}
+    for agent_id in topo_order:
+        agent = session.agent_by_id(agent_id)
+        if agent is None:
+            continue
+        repo_name = agent.repo
+        if repo_name not in repo_agents:
+            repo_agents[repo_name] = []
+            repo_order.append(repo_name)
+        repo_agents[repo_name].append(agent_id)
+
+    # 1. Copy each repo's staged files into that repo's worktree FIRST, so an empty
+    #    session bails before the VDB is advanced (mirrors atomic_commit's ordering).
+    repo_files: dict[str, list[str]] = {}
+    for repo_name in repo_order:
+        repo_ctx = router.repos.get(repo_name)
+        repo_root = repo_ctx.path if repo_ctx is not None else session.repo_root
+        repo_files[repo_name] = _copy_agents_to_repo(
+            session, repo_agents[repo_name], repo_root,
+        )
+
+    if not any(repo_files.values()):
+        _log(
+            "CONDUCTOR  ⚠ no staged files to commit across any repo — agents wrote "
+            "nothing to their staging dirs; skipping commit",
+        )
+        return []
+
+    # 2. Commit the VDB corpus ONCE, before any queue entry. The corpus is the session's
+    #    (keyed by session.repo_name); multi-repo file routing does not split it.
+    store = store_for(session)
+    s = store.get_or_create_session()
+    store.advance_session(s)
+    store.commit_session(assemble_summaries(session))
+
+    # 3. ONE queue entry per repo, enqueued in topological repo order. Routing is by the
+    #    repo's first agent — every agent in the list shares that repo — so the entry
+    #    lands on the correct worker.
+    committed: list[str] = []
+    for repo_name in repo_order:
+        files = repo_files[repo_name]
+        if not files:
+            continue
+        n_agents = len(repo_agents[repo_name])
+        message = (
+            f"feat(conductor): atomic commit session {session.session_id} "
+            f"repo={repo_name} ({n_agents} agents)"
+        )
+        router.enqueue_commit(
+            agent_id=repo_agents[repo_name][0],
+            files=files,
+            message=message,
+        )
+        committed.extend(files)
+
+        # 3a. Ensure a worker is draining this repo. The gate chain + merge tokens run
+        #     per repo inside the worker — no change needed here beyond starting it.
+        repo_ctx = router.repos.get(repo_name)
+        repo_root = repo_ctx.path if repo_ctx is not None else session.repo_root
+        _ensure_worker_for_path(repo_root, repo_name)
+
+    # 4. Tear down staging once every repo's entry is enqueued.
+    if cleanup and session.staging_root.exists():
+        shutil.rmtree(session.staging_root)
+
+    return sorted(set(committed))
 
 
 def staging_root_exists(staging_root: Path) -> bool:

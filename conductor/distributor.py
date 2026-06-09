@@ -4,6 +4,20 @@ Owns the staging directory layout, prompt injection (including the COMMIT PROTOC
 additions and the ``module_key`` stamp), the ``launch_agents.sh`` generator that opens
 one Terminal window per agent, and the ``.done`` / ``.conflict_report.txt`` filesystem
 handshake the agents use to signal completion and receive conflict reports.
+
+Two launch models coexist:
+
+* **Non-DAG sessions** (no agent declares a dependency) keep today's behaviour exactly:
+  ``write_launch_script`` emits ``launch_agents.sh``, the operator runs it to open every
+  agent's window at once, and ``wait_for_done`` blocks until all have signalled.
+* **DAG sessions** (at least one ``depends_on`` edge) are managed directly by the
+  Conductor: ``run_dependency_aware`` opens each agent's window only once every
+  dependency has signalled ``.done``, persisting each agent's state to the manifest as it
+  moves through waiting → ready → running → done. No ``launch_agents.sh`` is generated for
+  these — launch ordering is the whole point, and a script that opened everything at once
+  would defeat it.
+
+The selector is :func:`has_dependencies`; ``cli.run_session`` picks the path.
 """
 
 from __future__ import annotations
@@ -13,7 +27,10 @@ import subprocess
 import time
 from typing import TYPE_CHECKING, Any
 
+from conductor.dag import DAGBuilder
+
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from conductor.session import AgentSpec, ConductorSession
@@ -91,7 +108,7 @@ def _write_schema_template(adir: Path, session: ConductorSession, agent: AgentSp
     schema_path.write_text(json.dumps(template, indent=2))
 
 
-# ── Launch script ────────────────────────────────────────────────
+# ── Launch script (non-DAG sessions only) ────────────────────────
 
 # Header is raw so the backslash-escapes survive verbatim into the file. The heredoc
 # is intentionally unquoted: ``$1`` expands to the staging dir at launch time, while
@@ -120,6 +137,8 @@ _LAUNCH_HEADER = "\n".join([
     "# window before opening the next, because pbcopy uses the single global clipboard",
     "# and launching them all at once leaves the last agent's prompt on every window.",
     "# Regenerated on every distribute; do not edit by hand.",
+    "# NOTE: generated ONLY for non-DAG sessions. When agents declare dependencies the",
+    "# Conductor opens windows itself, in dependency order — see run_dependency_aware.",
     "set -euo pipefail",
     "",
     "launch() {",
@@ -147,6 +166,9 @@ def write_launch_script(session: ConductorSession) -> Path:
     before the next window's pbcopy overwrites the clipboard. Opening every window at
     once would leave the last agent's prompt on the clipboard for all of them — the
     Phase 4 failure where every agent received Agent 6's prompt.
+
+    Generated only for non-DAG sessions; DAG sessions are launched by
+    ``run_dependency_aware`` instead.
     """
     agents = session.agents
     total = len(agents)
@@ -166,6 +188,73 @@ def write_launch_script(session: ConductorSession) -> Path:
     script_path.write_text(body)
     script_path.chmod(0o755)
     return script_path
+
+
+# ── Single-agent launch (DAG sessions) ───────────────────────────
+
+
+def launch_agent_window(session: ConductorSession, agent: AgentSpec) -> None:
+    """Open one Terminal window for a single agent — the DAG-session launch primitive.
+
+    Mirrors what ``launch_agents.sh`` does per agent (cd into the staging dir, copy that
+    agent's PROMPT.md to the clipboard, launch claude interactively for the operator to
+    paste), but for exactly one agent, on demand, when its dependencies have cleared.
+    Because dependency ordering staggers launches in time, the global-clipboard race that
+    forced the serial ``read`` pauses in the batch script is largely avoided here — each
+    window copies its own PROMPT.md as it opens. Within a single ready-wave the operator
+    should still paste promptly into each window as it appears.
+
+    Best-effort: osascript failures (e.g. a headless host with no Terminal) are logged,
+    not raised, so one un-openable window never wedges the release loop.
+    """
+    adir = staging_dir(session, agent)
+    inner = (
+        f"cd '{adir}' && cat {PROMPT_FILE} | pbcopy && "
+        "echo 'Prompt copied to clipboard - paste with Cmd-V' && "
+        "claude --dangerously-skip-permissions"
+    )
+    try:
+        subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [
+                "osascript",
+                "-e", 'tell application "Terminal"',
+                "-e", "activate",
+                "-e", f'do script "{inner}"',
+                "-e", "end tell",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        _log(f"CONDUCTOR  ⚠ could not open window for {agent.agent_id}: {exc}")
+
+
+# ── State machine persistence ─────────────────────────────────────
+
+# Valid per-agent states; persisted to the session manifest so --resume knows where each
+# agent left off. Transitions: waiting → ready → running → done, with running → failed
+# (PeerChecker conflict), failed → running (retry), and waiting → blocked (a dependency
+# failed with no retry).
+VALID_STATES = frozenset({"waiting", "ready", "running", "done", "failed", "blocked"})
+
+
+def update_state(session: ConductorSession, agent_id: str, state: str) -> None:
+    """Write a new state for one agent and persist the manifest.
+
+    The manifest on disk is what makes ``--resume`` aware of where each agent is: a
+    crash between any two polls leaves every agent's last-written state recoverable.
+    Unknown ``agent_id`` is a no-op; an invalid ``state`` raises so a typo can't silently
+    persist a state the resume logic won't recognise.
+    """
+    if state not in VALID_STATES:
+        msg = f"invalid agent state {state!r} — expected one of {sorted(VALID_STATES)}"
+        raise ValueError(msg)
+    agent = session.agent_by_id(agent_id)
+    if agent is None:
+        return
+    agent.state = state
+    session.save_manifest()
 
 
 # ── Agent signalling ─────────────────────────────────────────────
@@ -270,6 +359,9 @@ def wait_for_done(
     is treated as a *soft signal*: it wrote to the repo instead of staging (violating
     the protocol), so we warn once and stop waiting on it rather than blocking forever.
     ``atomic_commit`` will then surface the empty staging and refuse the commit.
+
+    This is the non-DAG path — every agent is already running. DAG sessions use
+    :func:`run_dependency_aware`, which releases agents as their dependencies clear.
     """
     deadline = None if timeout is None else time.monotonic() + timeout
     pending = list(agents)
@@ -298,4 +390,139 @@ def wait_for_done(
         if deadline is not None and time.monotonic() >= deadline:
             return False
         time.sleep(poll_interval)
+    return True
+
+
+# ── Dependency-aware release loop (DAG sessions) ──────────────────
+
+
+def has_dependencies(session: ConductorSession) -> bool:
+    """True if any agent declares a dependency — the gate that selects the DAG path.
+
+    A session whose DAG has no edges (no prompt declared ``CONTRACTS_CONSUMED``) is
+    behaviourally identical to today: every agent is ready from the first poll. Such a
+    session takes the non-DAG path (``write_launch_script`` + ``wait_for_done``) so the
+    backward-compatibility guarantee holds exactly. Only an actual dependency edge flips
+    the Conductor into managed, dependency-ordered launching.
+    """
+    return any(node.depends_on for node in session.dag.values())
+
+
+def _agent_done(session: ConductorSession, agent: AgentSpec, warned: set[str]) -> bool:
+    """True if ``agent`` has signalled — normally via ``.done``, or via a soft signal.
+
+    Shares the soft-signal heuristic with ``wait_for_done`` so the two launch paths agree
+    on what "finished" means: a ``.done`` file, or (protocol violation) an empty staging
+    dir alongside matching untracked repo files. Warns once per soft-signalled agent.
+    """
+    if is_done(session, agent):
+        return True
+    if staging_is_empty(session, agent):
+        stray = repo_untracked_for_agent(session, agent)
+        if stray:
+            if agent.agent_id not in warned:
+                warned.add(agent.agent_id)
+                _log(
+                    f"CONDUCTOR  ⚠ {agent.agent_id} ({agent.module_key}) staged nothing "
+                    f"but wrote {len(stray)} matching file(s) directly to the repo "
+                    f"(e.g. {stray[0]}) — treating as soft signal, not waiting. "
+                    "Agents MUST write to staging only.",
+                )
+            return True
+    return False
+
+
+def run_dependency_aware(
+    session: ConductorSession,
+    *,
+    launch_fn: Callable[[ConductorSession, AgentSpec], None] | None = None,
+    poll_interval: float = 1.0,
+    timeout: float | None = None,
+) -> bool:
+    """Release agents as their dependencies clear; block until all are done.
+
+    The managed launch loop for DAG sessions. Each pass:
+
+    1. marks newly-signalled agents ``done`` (``.done`` or soft signal),
+    2. releases every agent whose dependencies are now all done — moving it
+       waiting → ready → running and opening its window via ``launch_fn``,
+    3. marks ``blocked`` any not-yet-launched agent with a failed dependency.
+
+    Every transition is persisted via :func:`update_state`, so a crash mid-session is
+    recoverable: on ``--resume`` agents already ``done`` are seeded into the done set and
+    skipped, ``running`` agents are re-polled (not relaunched — their window is already
+    open), and ``waiting``/``ready`` agents are re-evaluated against the DAG.
+
+    ``launch_fn`` defaults to :func:`launch_agent_window`; tests inject a stub to avoid
+    opening real Terminal windows. Returns True when every agent is done, False on
+    timeout or an unbreakable block (all remaining agents blocked by a failed dependency).
+    """
+    launch = launch_fn or launch_agent_window
+    builder = DAGBuilder()
+
+    all_ids = {a.agent_id for a in session.agents}
+    done: set[str] = set()
+    launched: set[str] = set()
+    failed: set[str] = set()
+    warned: set[str] = set()
+
+    # Seed from persisted state (for --resume): a previously-done agent must not be
+    # relaunched, and a previously-running agent must be re-polled rather than reopened.
+    for agent in session.agents:
+        if agent.state == "done" or is_done(session, agent):
+            done.add(agent.agent_id)
+        if agent.state in {"running", "done"}:
+            launched.add(agent.agent_id)
+        if agent.state == "failed":
+            failed.add(agent.agent_id)
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    while done != all_ids:
+        # 1. Promote newly-signalled agents to done.
+        for agent in session.agents:
+            aid = agent.agent_id
+            if aid in launched and aid not in done and _agent_done(session, agent, warned):
+                done.add(aid)
+                update_state(session, aid, "done")
+
+        # 2. Release agents whose dependencies are all satisfied.
+        for aid in sorted(builder.ready_agents(session.dag, done)):
+            if aid in launched or aid in done:
+                continue
+            ready_agent = session.agent_by_id(aid)
+            if ready_agent is None:
+                continue
+            update_state(session, aid, "ready")
+            launch(session, ready_agent)
+            launched.add(aid)
+            update_state(session, aid, "running")
+            _log(f"CONDUCTOR  ● launched {aid} — dependencies satisfied; paste prompt with ⌘V")
+
+        # 3. Mark agents whose dependency has failed (no retry) as blocked.
+        for agent in session.agents:
+            aid = agent.agent_id
+            if aid in launched or aid in done:
+                continue
+            node = session.dag.get(aid)
+            if node and any(dep in failed for dep in node.depends_on) and agent.state != "blocked":
+                update_state(session, aid, "blocked")
+
+        if done == all_ids:
+            return True
+
+        # Deadlock guard: nothing left can ever become ready (everything remaining is
+        # blocked or has an unmet, failed dependency and no agent is still running).
+        remaining = all_ids - done
+        if remaining and not (remaining & launched) and not builder.ready_agents(session.dag, done):
+            _log(
+                "CONDUCTOR  ✗ dependency stall — remaining agents are blocked by failed "
+                f"dependencies: {sorted(remaining)}",
+            )
+            return False
+
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_interval)
+
     return True
