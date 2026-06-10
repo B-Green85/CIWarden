@@ -1045,3 +1045,43 @@ a20ad14752021a88e2676976
 ---
 
 *"Generation is optional. Verification is not."*
+
+---
+
+## June 10, 2026 — {title placeholder}
+
+<!-- NARRATIVE: Replace this block with session narrative -->
+
+---
+
+### Commits This Session
+
+| SHA | Message | Gates | Total |
+|-----|---------|-------|-------|
+| `94ad76a` | docs(devlog): Conductor v2 session narrative | ✓ 7/7 | 54519ms |
+| `2c6fe77` | fix(conductor): eliminate wizard redundancy + normalize repo paths | ✓ 7/7 | 47396ms |
+
+---
+
+### Gate Summary
+
+| Gate | Fastest | Slowest | Runs |
+|------|---------|---------|------|
+| lint | 83ms | 85ms | 2 |
+| typecheck | 5748ms | 10807ms | 2 |
+| security | 698ms | 1174ms | 2 |
+| memory | 380ms | 569ms | 2 |
+| test | 9772ms | 11104ms | 2 |
+| stress | 30525ms | 30537ms | 2 |
+| build | 190ms | 243ms | 2 |
+
+---
+
+### Merge Tokens
+
+4abbbc96cf1990c7eca89eb1
+2be4ecde17eda2a0a73f269c
+
+---
+
+*"Generation is optional. Verification is not."*
