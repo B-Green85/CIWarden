@@ -1357,3 +1357,122 @@ a15aea2deb27fbe7756b1eff
 ---
 
 *"Generation is optional. Verification is not."*
+
+---
+
+## June 11, 2026 — GolemLinux Phase 6 — Bare Metal Boot
+
+
+**Date:** June 9, 2026
+**Branch:** main
+**Commit:** 9a2f914e (Phase 6 session) + drivers wiring
+**Merge token:** e7ddc95fbe3744f570702cf0
+**Agents:** 6
+**Gate results:** 7/7
+
+---
+
+## What This Phase Was
+
+Getting GolemLinux off QEMU and onto real silicon. Not a VM. Not an emulator. A real kernel booting on a real machine.
+
+The target: a 2017 MacBook Pro 13". Intel Kaby Lake. No T2 chip. UEFI compliant. The last Intel MacBook before Apple started locking down the boot path with bridgeOS.
+
+Five phases built the kernel. Phase 6 builds the path from binary to bare metal.
+
+---
+
+## What Landed
+
+**`scripts/flash_usb.sh`** — the USB flash script. Lists physical external drives only, refuses to offer anything flagged as internal. Requires the operator to type `CONFIRM` in all caps before touching the drive. Writes via `dd` to the raw device for speed. Syncs, ejects, and reports SHA256 of both the source image and the read-back bytes — VERIFIED or MISMATCH. macOS bash 3.2 compatible. Nothing happens without explicit confirmation. Nothing proceeds without verification.
+
+**`docs/APPLE_EFI_NOTES.md`** — 361 lines of authoritative Apple EFI reference material. The decisive finding: the 2017 MBP is pre-T2. No Secure Boot enforcement. No bridgeOS on the boot path. An unsigned `gkern` boots from USB with zero firmware changes required. Hold Option at startup, select the EFI Boot entry, done. `boot.asm` was correctly left untouched — the Apple quirks live in firmware boot-selection and on-disk layout, not at the handoff boundary where the 2017 MBP is standard UEFI-2.x-compliant Microsoft x64.
+
+**`docs/BARE_METAL_BOOT.md`** — step-by-step boot verification procedure written for a first-timer. One honest caveat baked in: COM1 serial output goes nowhere on a MacBook. There is no physical RS-232 port. Primary boot verification is the GOP framebuffer on the laptop's own display. The document accounts for this — verification is visual, not serial. Two-camera recording setup documented: overhead for screen and hands, close-up for legible text.
+
+**`src/drivers/cpuid.rs` + `mod.rs`** — CPUID hardware detection. Vendor string (GenuineIntel verification), CPU family/model/stepping via standard x86 extended-family folding rules, SSE/SSE2/AVX feature detection. Outputs to serial at boot. 6 unit tests. Wired into the kernel init sequence between `memory::init()` and `scheduler::init()`.
+
+**`Cargo.toml` release profile** — `opt-level = "z"` (size optimized), `strip = true` (debug symbols removed). Release binary: 1.05 MiB. Debug binary: 3.99 MiB. 3.8x smaller. A smaller binary boots faster and fits more comfortably in a bootloader context.
+
+**`docs/PHASE6_BARE_METAL.md`** — the milestone document. The framing that earned its place: *"A VM is a comfortable lie. GolemLinux runs on real silicon."*
+
+---
+
+## The v1.2 Fix Working in Production
+
+The staging isolation fix from CIWarden v1.2 ran for the first time on a real GolemLinux session:
+
+```
+CONDUCTOR  ● repo isolated: /Users/bmacbr/Projects/GolemLinux
+           (write permissions removed)
+...
+CONDUCTOR  ● repo restored: /Users/bmacbr/Projects/GolemLinux
+           (write permissions restored)
+```
+
+No rogue writes. No half-merged repo. Six agents, six staging directories, one atomic commit. The governance fix governed its first GolemLinux build cleanly.
+
+---
+
+## What Phase 6 Does Not Include
+
+The kernel boots. What it shows on boot depends on whether the GOP framebuffer is correctly initialized before the display pipeline is set up. That's runtime work — not Phase 6 scope. Agent 2 flagged the cross-subsystem advisories: GOP injection, memory-map/ExitBootServices retry, NVRAM hygiene. These are noted in `APPLE_EFI_NOTES.md` for Phase 7 or a dedicated hardware integration pass.
+
+Serial output at boot goes to COM1. On bare metal MacBook hardware, COM1 writes go into the void. The kernel doesn't know it's on a MacBook. A future phase will route early console output to the GOP framebuffer explicitly so boot progress is visible on the laptop's own display.
+
+---
+
+## What's Next
+
+Phase 7 — GolemLinux ships with tooling. The kernel is useful out of the box.
+
+```
+Agent 1    Package bootstrap — fetch, verify SHA256, install
+Agent 2    Shell — minimal governed command interface
+Agent 3    Default config — golem.toml, validated at boot
+Agent 4    First boot experience — banner, hardware detection, ready state
+Agent 5    Headless mode — serial console, SSH, deploy script
+Agent 6    README and Phase 7 documentation
+```
+
+After Phase 7: the bare metal boot on the Intel MacBook Air. GolemLinux running on real hardware, recorded.
+
+---
+
+*GolemLinux Phase 6 — Bare Metal Boot*
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*
+*Session date: June 9, 2026*
+
+---
+
+### Commits This Session
+
+| SHA | Message | Gates | Total |
+|-----|---------|-------|-------|
+| `6831a6d` | docs(devlog): CIWarden v1.2 session narrative | ✓ 7/7 | 47851ms |
+| `213c3df` | docs(devlog): CIWarden v1.2 session narrative | ✓ 7/7 | 47851ms |
+
+---
+
+### Gate Summary
+
+| Gate | Fastest | Slowest | Runs |
+|------|---------|---------|------|
+| lint | 84ms | 84ms | 2 |
+| typecheck | 3113ms | 3113ms | 2 |
+| security | 1158ms | 1158ms | 2 |
+| memory | 498ms | 498ms | 2 |
+| test | 12206ms | 12206ms | 2 |
+| stress | 30526ms | 30526ms | 2 |
+| build | 266ms | 266ms | 2 |
+
+---
+
+### Merge Tokens
+
+41d591e3e39454bca49eb5d1
+41d591e3e39454bca49eb5d1
+
+---
+
+*"Generation is optional. Verification is not."*
