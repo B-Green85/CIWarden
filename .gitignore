@@ -25,3 +25,11 @@ Cargo.lock
 sentinel/
 sentinel_py/
 .run/
+# Runtime artifacts
+**/__pycache__/
+*.pyc
+*.db
+*.log
+.DS_Store
+queue/queue.db
+queue/queue.log
