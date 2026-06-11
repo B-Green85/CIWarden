@@ -396,24 +396,58 @@ def write_launch_script(session: ConductorSession) -> Path:
 # ── Single-agent launch (DAG sessions) ───────────────────────────
 
 
-def launch_agent_window(session: ConductorSession, agent: AgentSpec) -> None:
+# Seconds to hold after opening each agent's window before the next one opens. pbcopy
+# writes the single global macOS pasteboard, so two windows opened back-to-back would each
+# clobber the other's prompt before the operator could paste. After each launch the
+# Conductor copies THIS agent's prompt to the clipboard and waits this long, giving the
+# operator time to switch to the new window and paste (⌘V) before the next launch.
+LAUNCH_PASTE_DELAY = 1.5
+
+
+def _copy_prompt_to_clipboard(adir: Path) -> None:
+    """Copy the agent's PROMPT.md onto the macOS clipboard via pbcopy. Best-effort.
+
+    The Conductor — not the agent's own window — owns the clipboard for DAG launches: a
+    window that pbcopied itself could start slowly and overwrite a *later* agent's prompt
+    after that agent's window was already up. Driving pbcopy here, synchronously between
+    staggered launches, keeps the clipboard deterministic. An unreadable prompt or missing
+    pbcopy (e.g. a headless host) is swallowed — the launch loop must never wedge on it.
+    """
+    try:
+        prompt_text = (adir / PROMPT_FILE).read_text()
+    except OSError:
+        return
+    try:
+        subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["pbcopy"], input=prompt_text, text=True, check=False,
+        )
+    except OSError:
+        return
+
+
+def launch_agent_window(
+    session: ConductorSession,
+    agent: AgentSpec,
+    *,
+    paste_delay: float = LAUNCH_PASTE_DELAY,
+) -> None:
     """Open one Terminal window for a single agent — the DAG-session launch primitive.
 
-    Mirrors what ``launch_agents.sh`` does per agent (cd into the staging dir, copy that
-    agent's PROMPT.md to the clipboard, launch claude interactively for the operator to
-    paste), but for exactly one agent, on demand, when its dependencies have cleared.
-    Because dependency ordering staggers launches in time, the global-clipboard race that
-    forced the serial ``read`` pauses in the batch script is largely avoided here — each
-    window copies its own PROMPT.md as it opens. Within a single ready-wave the operator
-    should still paste promptly into each window as it appears.
+    Opens the window (cd into the staging dir, launch claude interactively), then copies
+    this agent's PROMPT.md to the clipboard and pauses ``paste_delay`` seconds before
+    returning, so the operator can switch to the new window and paste (⌘V) before the next
+    launch overwrites the single global macOS clipboard. The Conductor is the *sole*
+    clipboard writer — the window no longer pbcopies itself — so a slow-starting window can
+    never clobber a later agent's prompt (the multi-window clipboard race).
 
-    Best-effort: osascript failures (e.g. a headless host with no Terminal) are logged,
-    not raised, so one un-openable window never wedges the release loop.
+    Best-effort: osascript failures (e.g. a headless host with no Terminal) are logged, not
+    raised, so one un-openable window never wedges the release loop. The clipboard copy and
+    paste pause still run, so the loop's pacing is identical on such hosts.
     """
     adir = staging_dir(session, agent)
     inner = (
-        f"cd '{adir}' && cat {PROMPT_FILE} | pbcopy && "
-        "echo 'Prompt copied to clipboard - paste with Cmd-V' && "
+        f"cd '{adir}' && "
+        "echo 'Paste the prompt with Cmd-V (⌘V), then press Enter' && "
         "claude --dangerously-skip-permissions"
     )
     try:
@@ -431,6 +465,15 @@ def launch_agent_window(session: ConductorSession, agent: AgentSpec) -> None:
         )
     except OSError as exc:
         _log(f"CONDUCTOR  ⚠ could not open window for {agent.agent_id}: {exc}")
+
+    # Conductor owns the clipboard: copy THIS agent's prompt, announce, then hold so the
+    # operator can paste before the next window opens and overwrites the pasteboard.
+    _copy_prompt_to_clipboard(adir)
+    _log(
+        f"CONDUCTOR  ● {agent.agent_id} ready — ⌘V to paste prompt, "
+        f"then next window opens in {paste_delay}s",
+    )
+    time.sleep(paste_delay)
 
 
 # ── State machine persistence ─────────────────────────────────────
