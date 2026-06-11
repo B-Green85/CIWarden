@@ -264,23 +264,127 @@ Address EVERY point in the report before rewriting.
 Do not resubmit until all points are resolved.
 """
 
+# Appended only to a *final-stage* agent — one whose dependencies cover every other agent
+# in the session (the DAG sink). Such an agent is the one most likely to launch into a repo
+# that does not yet hold its dependencies' work, because those dependencies may still be in
+# staging, uncommitted. Sentinel v3's Agent 8 hit exactly this: it checked the repo, found
+# no v3 work, and stood down. The block points it at the sibling staging dirs instead. The
+# listed paths use the "agent_001" (underscore) form, which the DAG parser does NOT read as
+# a "(Agent N)" reference, so appending this never perturbs dependency parsing.
+_STAGING_AWARENESS = """\
+
+---
+STAGING AWARENESS: Your dependencies may not yet be committed to the repo. Before
+checking the repo for their work, check the sibling staging directories:
+
+{dep_dirs}
+
+Each directory contains the files that agent produced. Read them directly if the repo
+does not yet have the work you depend on.
+---
+"""
+
 
 def staging_dir(session: ConductorSession, agent: AgentSpec) -> Path:
     return agent.staging_dir(session.staging_root)
 
 
 def distribute(session: ConductorSession) -> None:
-    """Create each agent's staging directory and write its prompt + schema template."""
+    """Create each agent's staging directory and write its prompt + schema template.
+
+    Two passes: write every base prompt first, then append a STAGING AWARENESS block to any
+    final-stage agent. The second pass is separate because detecting a final-stage agent
+    needs the whole session's dependency graph, which can only be parsed once all prompts
+    are on disk.
+    """
     for agent in session.agents:
         adir = staging_dir(session, agent)
         adir.mkdir(parents=True, exist_ok=True)
         _write_prompt(adir, agent)
         _write_schema_template(adir, session, agent)
+    _inject_staging_awareness(session)
 
 
 def _write_prompt(adir: Path, agent: AgentSpec) -> None:
     body = agent.prompt + _COMMIT_PROTOCOL.format(staging_dir=adir)
     (adir / PROMPT_FILE).write_text(body)
+
+
+# ── Final-stage agent detection + staging awareness ───────────────
+
+
+def _dependencies_by_id(session: ConductorSession) -> dict[str, list[str]]:
+    """Map each agent_id to its declared dependency agent_ids.
+
+    Parses the just-written PROMPT.md files with the DAGBuilder: ``distribute`` runs before
+    ``cli.build_dag``, so ``AgentSpec.depends_on`` is not populated yet and the graph must
+    be resolved here. Re-reading a prompt that already carries the COMMIT PROTOCOL / STAGING
+    AWARENESS text is idempotent — neither block contains a ``(Agent N)`` reference (staging
+    dirs use the underscore ``agent_001`` form) — so this yields exactly the dependencies
+    ``cli.build_dag`` will. An invalid graph (e.g. a cycle) is left for ``cli.build_dag`` to
+    surface authoritatively; here we just skip injection.
+    """
+    prompt_map = {a.agent_id: staging_dir(session, a) / PROMPT_FILE for a in session.agents}
+    try:
+        nodes = DAGBuilder().build(prompt_map)
+    except ValueError:
+        return {}
+    return {agent_id: node.depends_on for agent_id, node in nodes.items()}
+
+
+def _covers_all_others(agent_id: str, deps: list[str], all_ids: set[str]) -> bool:
+    """True if ``deps`` includes every agent in the session except ``agent_id`` itself.
+
+    Requires a non-empty ``deps``: an agent with no dependencies has nothing to be aware of,
+    so single-agent and fully-independent sessions are never final-stage.
+    """
+    return bool(deps) and (all_ids - {agent_id}).issubset(deps)
+
+
+def final_stage_agents(session: ConductorSession) -> list[str]:
+    """agent_ids whose dependencies cover every *other* agent in the session — the DAG sinks.
+
+    These are the agents most likely to launch into a repo that does not yet hold their
+    dependencies' work (it may still be in staging). Requires the prompts to be on disk
+    (it reads them); call after ``distribute``'s write pass. Returns ids in session order.
+    """
+    deps_by_id = _dependencies_by_id(session)
+    all_ids = {a.agent_id for a in session.agents}
+    return [
+        a.agent_id
+        for a in session.agents
+        if _covers_all_others(a.agent_id, deps_by_id.get(a.agent_id, []), all_ids)
+    ]
+
+
+def _staging_awareness_block(session: ConductorSession, dep_ids: list[str]) -> str:
+    """Render the STAGING AWARENESS block listing each dependency's staging directory."""
+    dep_dirs = "\n".join(
+        f"{staging_dir(session, dep)}/"
+        for dep_id in sorted(dep_ids)
+        if (dep := session.agent_by_id(dep_id)) is not None
+    )
+    return _STAGING_AWARENESS.format(dep_dirs=dep_dirs)
+
+
+def _inject_staging_awareness(session: ConductorSession) -> None:
+    """Append the STAGING AWARENESS block to every final-stage agent's prompt.
+
+    A second pass over the written prompts: only final-stage agents are touched; every other
+    prompt is left byte-for-byte as the write pass produced it.
+    """
+    deps_by_id = _dependencies_by_id(session)
+    all_ids = {a.agent_id for a in session.agents}
+    for agent in session.agents:
+        deps = deps_by_id.get(agent.agent_id, [])
+        if not _covers_all_others(agent.agent_id, deps, all_ids):
+            continue
+        prompt_path = staging_dir(session, agent) / PROMPT_FILE
+        prompt_path.write_text(prompt_path.read_text() + _staging_awareness_block(session, deps))
+        _log(
+            f"CONDUCTOR  ● {agent.agent_id} is final-stage — injected staging awareness "
+            f"for {len(deps)} dependencies",
+        )
 
 
 def _write_schema_template(adir: Path, session: ConductorSession, agent: AgentSpec) -> None:

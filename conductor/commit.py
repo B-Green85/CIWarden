@@ -295,10 +295,14 @@ def atomic_commit_multi_repo(
         files = repo_files[repo_name]
         if not files:
             continue
-        n_agents = len(repo_agents[repo_name])
+        # Report the whole session's agent count, not just the agents routed to this repo.
+        # A commit is part of a session, and every agent contributed to it — including any
+        # that landed in another repo or wrote directly to the repo instead of staging.
+        # Per-repo counting is what made a multi-repo Sentinel v3 commit read "7 agents"
+        # when the session had 8.
         message = (
             f"feat(conductor): atomic commit session {session.session_id} "
-            f"repo={repo_name} ({n_agents} agents)"
+            f"repo={repo_name} ({len(session.agents)} agents)"
         )
         router.enqueue_commit(
             agent_id=repo_agents[repo_name][0],

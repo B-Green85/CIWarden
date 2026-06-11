@@ -154,6 +154,179 @@ def test_empty_session_builds_empty_graph() -> None:
     assert DAGBuilder().build({}) == {}
 
 
+# ── Regression: real CONTRACTS_CONSUMED notations from the Sentinel v3 session ──
+# Before the fix, AGENT_REF_PATTERN only matched a number *inside* parens — "(Agent N)" —
+# so every other real notation parsed as "no dependencies" (DEVLOG: agents 2,3,4,7,8 all
+# showed no deps; only 5 and 6, which used "(Agent 1)", resolved). Each test below uses a
+# notation taken verbatim from the prompt that exposed the gap.
+
+
+def test_bare_agent_reference_with_colon(tmp_path: Path) -> None:
+    # Agent 4's real block: "- Agent 3: SentinelTransport (...)" — number not parenthesised.
+    body = (
+        "CONTRACTS_CONSUMED:\n"
+        "- sentinel-types: ProcessIdentity, InterceptionEvent\n"
+        "- Agent 3: SentinelTransport (transport layer, for socket auth integration)\n"
+        "MODIFIES_EXISTING: yes\n"
+    )
+    prompts = {
+        "agent_003": _write_prompt(tmp_path, "agent_003", "root"),
+        "agent_004": _write_prompt(tmp_path, "agent_004", body),
+    }
+    nodes = DAGBuilder().build(prompts)
+    assert nodes["agent_004"].depends_on == ["agent_003"]
+
+
+def test_number_before_parenthetical_label(tmp_path: Path) -> None:
+    # Agent 7's real block: the number precedes a *label* in parens — "Agent 1 (sentinel-types)".
+    body = (
+        "CONTRACTS_CONSUMED:\n"
+        "- Agent 1 (sentinel-types): SentinelCapability trait, AgentId, DegradationEvent\n"
+        "- Agent 3 (transport): KernelTransport stub\n"
+        "- Agent 5 (controls): SentinelCapability trait interface\n"
+        "- Agent 6 (audit): ChainedAuditEntry format\n"
+        "- GolemLinux src/syscall/: wire intercept() into dispatch path\n"
+        "MODIFIES_EXISTING:\n"
+    )
+    prompts = {
+        "agent_001": _write_prompt(tmp_path, "agent_001", "root"),
+        "agent_003": _write_prompt(tmp_path, "agent_003", "root"),
+        "agent_005": _write_prompt(tmp_path, "agent_005", "root"),
+        "agent_006": _write_prompt(tmp_path, "agent_006", "root"),
+        "agent_007": _write_prompt(tmp_path, "agent_007", body),
+    }
+    nodes = DAGBuilder().build(prompts)
+    assert nodes["agent_007"].depends_on == ["agent_001", "agent_003", "agent_005", "agent_006"]
+
+
+def test_plural_agents_inclusive_range(tmp_path: Path) -> None:
+    # Agent 8's real block: "All agents 1–7" — plural keyword, en-dash range, no parens.
+    body = (
+        "CONTRACTS_CONSUMED:\n"
+        "- All agents 1–7: every type and interface they produced\n"
+        "- sentinel-py: existing bindings (unchanged)\n"
+        "MODIFIES_EXISTING: yes\n"
+    )
+    prompts = {
+        f"agent_{n:03d}": _write_prompt(tmp_path, f"agent_{n:03d}", "root")
+        for n in range(1, 8)
+    }
+    prompts["agent_008"] = _write_prompt(tmp_path, "agent_008", body)
+    nodes = DAGBuilder().build(prompts)
+    assert nodes["agent_008"].depends_on == [f"agent_{n:03d}" for n in range(1, 8)]
+
+
+def test_agent_identifier_tokens_do_not_match(tmp_path: Path) -> None:
+    # "AgentId" / "AgentEvent" are type names, not references — they must NOT create deps,
+    # else every agent consuming those types would gain a phantom dependency.
+    body = (
+        "CONTRACTS_CONSUMED:\n"
+        "- sentinel-types: AgentId, DegradationEvent, AgentEvent (no real dependency)\n"
+        "MODIFIES_EXISTING: no\n"
+    )
+    prompts = {
+        "agent_001": _write_prompt(tmp_path, "agent_001", "root"),
+        "agent_002": _write_prompt(tmp_path, "agent_002", body),
+    }
+    nodes = DAGBuilder().build(prompts)
+    assert nodes["agent_002"].depends_on == []
+
+
+def test_comma_and_word_list(tmp_path: Path) -> None:
+    # A list ("1, 2 and 4") names distinct agents — NOT a range.
+    body = "CONTRACTS_CONSUMED:\n- Agents 1, 2 and 4: shared types\nMODIFIES_EXISTING:\n"
+    prompts = {
+        f"agent_{n:03d}": _write_prompt(tmp_path, f"agent_{n:03d}", "root")
+        for n in (1, 2, 4)
+    }
+    prompts["agent_005"] = _write_prompt(tmp_path, "agent_005", body)
+    nodes = DAGBuilder().build(prompts)
+    assert nodes["agent_005"].depends_on == ["agent_001", "agent_002", "agent_004"]
+
+
+def test_range_with_to_keyword(tmp_path: Path) -> None:
+    # A worded range ("1 to 3") expands inclusively, like the en-dash form.
+    body = "CONTRACTS_CONSUMED:\n- agents 1 to 3: foundation types\nMODIFIES_EXISTING:\n"
+    prompts = {
+        f"agent_{n:03d}": _write_prompt(tmp_path, f"agent_{n:03d}", "root")
+        for n in (1, 2, 3)
+    }
+    prompts["agent_004"] = _write_prompt(tmp_path, "agent_004", body)
+    nodes = DAGBuilder().build(prompts)
+    assert nodes["agent_004"].depends_on == ["agent_001", "agent_002", "agent_003"]
+
+
+def test_crate_name_only_reference_is_unresolved(tmp_path: Path) -> None:
+    # Known limitation, documented: Agents 2 & 3 referenced producers ONLY by crate name
+    # ("sentinel-types") with no "Agent N" token, so a number-based parser cannot resolve
+    # them. Such prompts must name the agent explicitly (as Agents 5/6 did via "(Agent 1)").
+    body = "CONTRACTS_CONSUMED:\n- sentinel-types (ProcessIdentity)\nMODIFIES_EXISTING: false\n"
+    prompts = {
+        "agent_001": _write_prompt(tmp_path, "agent_001", "root"),
+        "agent_002": _write_prompt(tmp_path, "agent_002", body),
+    }
+    nodes = DAGBuilder().build(prompts)
+    assert nodes["agent_002"].depends_on == []
+
+
+def test_sentinel_v3_full_session_graph(tmp_path: Path) -> None:
+    # End-to-end regression over all eight Sentinel v3 blocks (notations verbatim). This is
+    # the exact session that exposed the bug. After the fix, agents 4, 7, 8 resolve (they
+    # did not before); only the crate-name-only agents (2, 3) remain rootless — a
+    # prompt-authoring gap, not a parser one.
+    blocks = {
+        1: "CONTRACTS_CONSUMED: none\nMODIFIES_EXISTING: false\n",
+        2: "CONTRACTS_CONSUMED:\n"
+           "- sentinel-types (ProcessIdentity — for binary_hash field format)\n"
+           "MODIFIES_EXISTING: false\n",
+        3: "CONTRACTS_CONSUMED:\n"
+           "- sentinel-types: ProcessIdentity\n"
+           "- sentinel-core: SentinelConfig (existing), SentinelError (existing)\n"
+           "MODIFIES_EXISTING: yes\n",
+        4: "CONTRACTS_CONSUMED:\n"
+           "- sentinel-types: ProcessIdentity, InterceptionEvent\n"
+           "- Agent 3: SentinelTransport (transport layer, for socket auth integration)\n"
+           "MODIFIES_EXISTING: yes\n",
+        5: "CONTRACTS_CONSUMED:\n"
+           "- sentinel-types: AgentId, DegradationEvent, ProcessIdentity (Agent 1)\n"
+           "- sentinel-core: SentinelError, audit write channel\n"
+           "MODIFIES_EXISTING: yes\n",
+        6: "CONTRACTS_CONSUMED:\n"
+           "- sentinel-types: ChainedAuditEntry, AgentId, AuditEvent (Agent 1)\n"
+           "- GolemLinux src/sentinel/: SHA-256 implementation (copy, do not import)\n"
+           "MODIFIES_EXISTING: yes\n",
+        7: "CONTRACTS_CONSUMED:\n"
+           "- Agent 1 (sentinel-types): SentinelCapability trait, AgentId\n"
+           "- Agent 3 (transport): KernelTransport stub\n"
+           "- Agent 5 (controls): trait interface\n"
+           "- Agent 6 (audit): ChainedAuditEntry format\n"
+           "MODIFIES_EXISTING:\n",
+        8: "CONTRACTS_CONSUMED:\n"
+           "- All agents 1–7: every type and interface they produced\n"
+           "- sentinel-py: existing bindings (unchanged)\n"
+           "MODIFIES_EXISTING: yes\n",
+    }
+    prompts = {
+        f"agent_{n:03d}": _write_prompt(tmp_path, f"agent_{n:03d}", blocks[n])
+        for n in range(1, 9)
+    }
+    nodes = DAGBuilder().build(prompts)
+    got = {aid: nodes[aid].depends_on for aid in sorted(nodes)}
+    assert got == {
+        "agent_001": [],
+        "agent_002": [],  # crate-name-only ref — known unresolved
+        "agent_003": [],  # crate-name-only ref — known unresolved
+        "agent_004": ["agent_003"],
+        "agent_005": ["agent_001"],
+        "agent_006": ["agent_001"],
+        "agent_007": ["agent_001", "agent_003", "agent_005", "agent_006"],
+        "agent_008": [
+            "agent_001", "agent_002", "agent_003", "agent_004",
+            "agent_005", "agent_006", "agent_007",
+        ],
+    }
+
+
 def test_dependency_node_is_json_serialisable() -> None:
     # Round-trips through json — only strings/lists, as the session manifest requires.
     import json

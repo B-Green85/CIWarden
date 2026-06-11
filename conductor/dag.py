@@ -42,12 +42,45 @@ class DependencyNode:
 class DAGBuilder:
     """Builds a dependency graph from agent prompt files.
 
-    Parses ``CONTRACTS_CONSUMED`` blocks to extract inter-agent dependencies declared
-    via the ``(Agent N)`` notation.
+    Parses ``CONTRACTS_CONSUMED`` blocks to extract inter-agent dependencies declared by
+    any ``Agent N`` reference — parenthesised ``(Agent 1)``, bare ``Agent 3:``, number
+    before a label ``Agent 1 (sentinel-types)``, or a plural range ``agents 1–7`` — see
+    :data:`AGENT_REF_PATTERN`. A producer referenced only by the crate/module name it
+    emits (e.g. ``sentinel-types:`` with no ``Agent N``) carries no number and so is not
+    resolvable here; such prompts must name the agent explicitly.
     """
 
-    # Matches the dependency declaration "(Agent 3)" anywhere in a consumed line.
-    AGENT_REF_PATTERN = re.compile(r"\(Agent\s+(\d+)\)", re.IGNORECASE)
+    # A dependency on agent N is written many ways in real CONTRACTS_CONSUMED blocks. All
+    # of these forms appeared in the Sentinel v3 session, and all must resolve:
+    #   "(Agent 1)"            parenthesised, number inside        (Agents 5, 6)
+    #   "- Agent 3: Transport" bare, number then a colon            (Agent 4)
+    #   "Agent 1 (sentinel)"   number then a parenthetical *label*  (Agent 7)
+    #   "All agents 1–7"       plural keyword + an inclusive range  (Agent 8)
+    #   "Agents 1, 2 and 4"    plural keyword + comma / word list
+    # The old pattern only matched "(Agent N)" — number *inside* the parens — so every form
+    # above except the first silently parsed as "no dependencies".
+    #
+    # The matcher anchors on the word "Agent"/"Agents" and captures the run of numbers, list
+    # separators, and range dashes that immediately follow (after optional ":"/"#"/space),
+    # wherever the number sits relative to any surrounding parentheses. Identifiers like
+    # "AgentId" / "AgentEvent" never match: the keyword must be followed by a digit, which
+    # those are not. Only the CONTRACTS_CONSUMED section is scanned (see _extract_dependencies),
+    # so a stray "Agent N" in prose elsewhere is still ignored.
+    _CONNECTOR = r"(?:\s*(?:[-–—,/&]|\b(?:and|to|through|thru)\b)\s*)"
+    AGENT_REF_PATTERN = re.compile(
+        r"\bagents?[\s:#]*(\d+(?:" + _CONNECTOR + r"\d+)*)",
+        re.IGNORECASE,
+    )
+    # Within a captured run, a "lo–hi" / "lo to hi" span expands to every agent between the
+    # endpoints; a comma / "and" list does not (those are distinct agents, not a range).
+    _RANGE_REF = re.compile(
+        r"(\d+)\s*(?:[-–—]|\b(?:to|through|thru)\b)\s*(\d+)", re.IGNORECASE,
+    )
+    _INT_REF = re.compile(r"\d+")
+    # Defensive cap: a malformed "agents 1–100000" expands to just its endpoints rather than
+    # a hundred-thousand-element list. Real sessions cap at 12 agents; unknown numbers are
+    # dropped at resolution anyway, so this only guards against pathological input.
+    _MAX_RANGE_SPAN = 100
     # Pulls the trailing integer out of an agent_id ("agent_001" → 1, "agent_3" → 3),
     # so a "(Agent N)" reference resolves regardless of zero-padding in the id.
     _AGENT_ID_NUM = re.compile(r"(\d+)\s*$")
@@ -119,12 +152,45 @@ class DAGBuilder:
         consumed_section = consumed_match.group(1)
 
         deps: list[str] = []
-        for num_str in self.AGENT_REF_PATTERN.findall(consumed_section):
-            dep_id = num_to_id.get(int(num_str))
-            if dep_id is None or dep_id == self_id or dep_id in deps:
-                continue
-            deps.append(dep_id)
+        for run in self.AGENT_REF_PATTERN.findall(consumed_section):
+            for num in self._agent_numbers(run):
+                dep_id = num_to_id.get(num)
+                if dep_id is None or dep_id == self_id or dep_id in deps:
+                    continue
+                deps.append(dep_id)
         return deps
+
+    @classmethod
+    def _agent_numbers(cls, run: str) -> list[int]:
+        """Expand a captured agent-number run ("1", "1, 3", "1–7") to a list of ints.
+
+        Ranges (dash / "to" / "through") expand inclusively; comma and "and" lists do not —
+        they name distinct agents. First-appearance order is preserved and duplicates are
+        dropped, so ``"1, 1–3"`` yields ``[1, 2, 3]``. A reversed range ("3–1") expands
+        descending; an absurdly wide one collapses to its endpoints (see ``_MAX_RANGE_SPAN``).
+        """
+        numbers: list[int] = []
+        range_spans: list[tuple[int, int]] = []
+        for m in cls._RANGE_REF.finditer(run):
+            lo, hi = int(m.group(1)), int(m.group(2))
+            range_spans.append((m.start(), m.end()))
+            if abs(hi - lo) > cls._MAX_RANGE_SPAN:
+                numbers.extend((lo, hi))
+                continue
+            step = 1 if hi >= lo else -1
+            numbers.extend(range(lo, hi + step, step))
+        # Standalone numbers — those not already consumed as a range endpoint.
+        for m in cls._INT_REF.finditer(run):
+            if any(start <= m.start() < end for start, end in range_spans):
+                continue
+            numbers.append(int(m.group()))
+        seen: set[int] = set()
+        ordered: list[int] = []
+        for num in numbers:
+            if num not in seen:
+                seen.add(num)
+                ordered.append(num)
+        return ordered
 
     def _validate(self, nodes: dict[str, DependencyNode]) -> None:
         """Validate the DAG: every node reachable, no cycles.
