@@ -1193,3 +1193,49 @@ The wizard was asking repo per-agent (Enter x8) and redundantly asking for a pat
 ---
 
 *"Generation is optional. Verification is not."*
+
+---
+
+## June 11, 2026 — {title placeholder}
+
+<!-- NARRATIVE: Replace this block with session narrative -->
+
+---
+
+### Commits This Session
+
+| SHA | Message | Gates | Total |
+|-----|---------|-------|-------|
+| `7fa7a40` | docs(devlog): Sentinel v3 build session narrative | ✓ 7/7 | 42953ms |
+| `4fcef9b` | fix(conductor): staging isolation — repo read-only during sessions | ✓ 7/7 | 44926ms |
+| `d749445` | fix(conductor): clipboard serialization — Conductor owns clipboard, 1.5s window delay | ✓ 7/7 | 47383ms |
+| `461770b` | fix(conductor): CIWarden v1.2 — five governance fixes | ✓ 7/7 | 47851ms |
+| `ccf3c75` | docs(devlog): CIWarden v1.2 session narrative | ✓ 7/7 | 47851ms |
+
+---
+
+### Gate Summary
+
+| Gate | Fastest | Slowest | Runs |
+|------|---------|---------|------|
+| lint | 28ms | 84ms | 5 |
+| typecheck | 895ms | 3113ms | 5 |
+| security | 678ms | 1288ms | 5 |
+| memory | 367ms | 515ms | 5 |
+| test | 9774ms | 12260ms | 5 |
+| stress | 30526ms | 30533ms | 5 |
+| build | 200ms | 266ms | 5 |
+
+---
+
+### Merge Tokens
+
+a15aea2deb27fbe7756b1eff
+8253b6c37dc4779e1bc2a90a
+273a8263f9efe0b2a911bee9
+41d591e3e39454bca49eb5d1
+41d591e3e39454bca49eb5d1
+
+---
+
+*"Generation is optional. Verification is not."*
