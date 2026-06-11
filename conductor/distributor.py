@@ -22,16 +22,21 @@ The selector is :func:`has_dependencies`; ``cli.run_session`` picks the path.
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import json
+import os
+import signal
 import subprocess
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from conductor.dag import DAGBuilder
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+    from types import FrameType
 
     from conductor.session import AgentSpec, ConductorSession
 
@@ -44,6 +49,200 @@ PROMPT_FILE = "PROMPT.md"
 
 def _log(message: str) -> None:
     print(message)
+
+
+# ── Repo isolation (read-only target repos during a session) ──────
+#
+# GOVERNANCE INVARIANT: while agents are running, the target repo(s) are the staging
+# dirs' read-only mirror — every byte of agent output MUST reach the repo through the
+# Conductor's atomic commit, never by an agent writing the worktree directly. We enforce
+# this by stripping the write bit off every file and directory in each repo for the
+# duration of the agent phase, then restoring each path's exact original mode.
+#
+# Restore TIMING is dictated by a hard mechanical fact: the atomic commit copies staged
+# files INTO the worktree (conductor.commit.copy_staged_to_worktree → shutil.copy2 +
+# mkdir). A recursively read-only repo (chmod -R a-w strips write on *directories* too,
+# blocking new-file creation) would make that copy raise PermissionError. So the
+# functional restore happens the instant the agent phase ends — the last hook this module
+# owns before cli.run_session calls atomic_commit — leaving the repo writable for proof +
+# commit. The atexit / signal cleanup handlers are the bulletproof net: they restore on
+# normal exit (firing AFTER the commit, at interpreter teardown), on an unhandled
+# exception, and on SIGTERM / SIGINT — so a crashed Conductor never leaves a repo locked.
+#
+# Repo paths come from the same registry the RepoRouter is built from: session.repo_root
+# (the default repo) plus the wizard's repo_paths.json sidecar (every additional repo in a
+# multi-repo session). Mirrors conductor.cli.REPO_PATHS_FILE — duplicated, not imported,
+# to avoid a cli ↔ distributor import cycle.
+REPO_PATHS_FILE = "repo_paths.json"
+
+# Write bits for owner/group/other; isolation clears exactly these and nothing else, so
+# read and execute permissions are preserved (directories stay traversable, scripts stay
+# runnable). Restoration writes back the full saved st_mode, so any bit we touched returns.
+_WRITE_BITS = 0o222
+
+
+def _iter_repo_paths(root: Path) -> list[str]:
+    """Every non-symlink file and directory under ``root`` (root included), as strings.
+
+    Symlinks are skipped so we never chmod a link's target — which could live outside the
+    repo. ``os.walk`` does not descend into symlinked directories (followlinks=False), so
+    isolation stays contained within the repo tree.
+    """
+    paths: list[str] = []
+    root_str = str(root)
+    if not os.path.islink(root_str):
+        paths.append(root_str)
+    for dirpath, dirnames, filenames in os.walk(root_str, followlinks=False):
+        for name in (*dirnames, *filenames):
+            candidate = os.path.join(dirpath, name)
+            if not os.path.islink(candidate):
+                paths.append(candidate)
+    return paths
+
+
+def _session_repo_paths(session: ConductorSession) -> list[Path]:
+    """Resolved roots of every repo in the session — default repo plus sidecar repos.
+
+    The default repo is always ``session.repo_root``. For a multi-repo session the wizard
+    persisted each additional repo's path in ``repo_paths.json`` next to the manifest; we
+    read it here so isolation covers ALL repos an agent might write to, not just the
+    invoking one. De-duplicated by resolved path so the same repo under two spellings (or
+    an override that equals the default) is isolated once.
+    """
+    roots: list[Path] = [session.repo_root]
+    if getattr(session, "multi_repo", False):
+        sidecar = session.staging_base / REPO_PATHS_FILE
+        if sidecar.exists():
+            try:
+                data = json.loads(sidecar.read_text())
+            except (json.JSONDecodeError, OSError):
+                data = {}
+            if isinstance(data, dict):
+                roots.extend(Path(str(v)).expanduser() for v in data.values())
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for root in roots:
+        try:
+            resolved = root.expanduser().resolve()
+        except OSError:
+            continue
+        key = str(resolved)
+        if key not in seen and resolved.is_dir():
+            seen.add(key)
+            unique.append(resolved)
+    return unique
+
+
+class _RepoIsolator:
+    """Makes a set of repos read-only for the agent phase and restores them exactly.
+
+    A single module-level instance (:data:`_ISOLATOR`) holds the original-mode map so the
+    two non-DAG hooks — ``write_launch_script`` isolates, ``wait_for_done`` restores — and
+    the DAG hook (``run_dependency_aware`` does both in a try/finally) share one snapshot.
+    Restoration is idempotent: whichever of the functional restore, atexit, or a signal
+    handler fires first wins; the rest are no-ops.
+    """
+
+    def __init__(self) -> None:
+        self._original_modes: dict[str, int] = {}
+        self._isolated_repos: list[str] = []
+        self._active = False
+        self._cleanup_registered = False
+        self._prev_handlers: dict[int, Any] = {}
+
+    def isolate(self, repos: list[Path]) -> None:
+        """Snapshot then strip write bits from every path under each repo.
+
+        No-op if already active (re-isolating would snapshot already-read-only modes as the
+        "original", corrupting restore) or if there is nothing to isolate. The cleanup
+        handler is registered BEFORE the first chmod, so even a crash mid-isolation
+        restores whatever was already changed.
+        """
+        if self._active or not repos:
+            return
+        # Register cleanup BEFORE any permission change — the whole point is that a crash
+        # at any later point still restores.
+        self._register_cleanup()
+        self._active = True
+        self._original_modes.clear()
+        self._isolated_repos.clear()
+        for repo in repos:
+            paths = _iter_repo_paths(repo)
+            for path in paths:
+                try:
+                    self._original_modes[path] = os.stat(path).st_mode & 0o7777
+                except OSError:
+                    continue
+            for path, mode in list(self._original_modes.items()):
+                with contextlib.suppress(OSError):
+                    os.chmod(path, mode & ~_WRITE_BITS)
+            self._isolated_repos.append(str(repo))
+            _log(f"CONDUCTOR  ● repo isolated: {repo} (write permissions removed)")
+
+    def restore(self) -> None:
+        """Restore every path's exact original mode. Idempotent; safe from any context."""
+        if not self._active:
+            return
+        self._active = False
+        for path, mode in self._original_modes.items():
+            with contextlib.suppress(OSError):
+                os.chmod(path, mode)
+        for repo in self._isolated_repos:
+            _log(f"CONDUCTOR  ● repo restored: {repo} (write permissions restored)")
+        self._original_modes.clear()
+        self._isolated_repos.clear()
+
+    def _register_cleanup(self) -> None:
+        """Wire atexit + SIGTERM/SIGINT to restore — once, before any chmod.
+
+        ``atexit`` covers a normal return (firing after atomic_commit at interpreter
+        teardown) and an unhandled exception. SIGTERM and SIGINT need explicit handlers:
+        SIGTERM's default termination skips atexit entirely, so without a handler a
+        ``kill`` would leave the repo locked. Signal registration that fails (e.g. called
+        off the main thread, as some tests do) is tolerated — atexit still guards the
+        common paths.
+        """
+        if self._cleanup_registered:
+            return
+        self._cleanup_registered = True
+        atexit.register(self.restore)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            # Not the main thread / unsupported platform — atexit remains in force.
+            with contextlib.suppress(ValueError, OSError):
+                self._prev_handlers[sig] = signal.signal(sig, self._handle_signal)
+
+    def _handle_signal(self, signum: int, frame: FrameType | None) -> None:
+        """Restore permissions, then re-raise the signal under its previous disposition.
+
+        We do not swallow the signal: after restoring we reinstate the prior handler and
+        re-send the signal so the process still terminates (or runs whatever handler was
+        installed before us). This keeps Ctrl-C / kill behaving normally while guaranteeing
+        the repo is unlocked first.
+        """
+        self.restore()
+        prev = self._prev_handlers.get(signum, signal.SIG_DFL)
+        if callable(prev):
+            prev(signum, frame)
+            return
+        try:
+            signal.signal(signum, prev)
+        except (ValueError, OSError):
+            signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+
+_ISOLATOR = _RepoIsolator()
+
+
+def isolate_session_repos(session: ConductorSession) -> None:
+    """Make every repo in the session read-only for the agent phase (write bits removed)."""
+    _ISOLATOR.isolate(_session_repo_paths(session))
+
+
+def restore_session_repos() -> None:
+    """Restore the original permissions of every isolated repo. Idempotent."""
+    _ISOLATOR.restore()
+
 
 _COMMIT_PROTOCOL = """\
 
@@ -187,6 +386,10 @@ def write_launch_script(session: ConductorSession) -> Path:
     session.staging_root.mkdir(parents=True, exist_ok=True)
     script_path.write_text(body)
     script_path.chmod(0o755)
+    # Lock the repo(s) read-only BEFORE the operator runs this script and opens any agent
+    # window. wait_for_done restores once every agent has signalled. (The script and
+    # staging dirs live outside the repo, so isolating here does not block writing them.)
+    isolate_session_repos(session)
     return script_path
 
 
@@ -362,35 +565,43 @@ def wait_for_done(
 
     This is the non-DAG path — every agent is already running. DAG sessions use
     :func:`run_dependency_aware`, which releases agents as their dependencies clear.
+
+    Restores any repo isolation applied by :func:`write_launch_script` once every agent has
+    signalled (or on timeout), so the repo is writable again for proofing and the atomic
+    commit. The restore is in a ``finally`` — a poll-loop exception can never leave a repo
+    locked, and the atexit/signal handlers back it up regardless.
     """
-    deadline = None if timeout is None else time.monotonic() + timeout
-    pending = list(agents)
-    warned: set[str] = set()
-    while pending:
-        still_pending: list[AgentSpec] = []
-        for a in pending:
-            if is_done(session, a):
-                continue
-            if staging_is_empty(session, a):
-                stray = repo_untracked_for_agent(session, a)
-                if stray:
-                    if a.agent_id not in warned:
-                        warned.add(a.agent_id)
-                        _log(
-                            f"CONDUCTOR  ⚠ {a.agent_id} ({a.module_key}) staged nothing "
-                            f"but wrote {len(stray)} matching file(s) directly to the repo "
-                            f"(e.g. {stray[0]}) — treating as soft signal, not waiting. "
-                            "Agents MUST write to staging only.",
-                        )
+    try:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        pending = list(agents)
+        warned: set[str] = set()
+        while pending:
+            still_pending: list[AgentSpec] = []
+            for a in pending:
+                if is_done(session, a):
                     continue
-            still_pending.append(a)
-        pending = still_pending
-        if not pending:
-            return True
-        if deadline is not None and time.monotonic() >= deadline:
-            return False
-        time.sleep(poll_interval)
-    return True
+                if staging_is_empty(session, a):
+                    stray = repo_untracked_for_agent(session, a)
+                    if stray:
+                        if a.agent_id not in warned:
+                            warned.add(a.agent_id)
+                            _log(
+                                f"CONDUCTOR  ⚠ {a.agent_id} ({a.module_key}) staged nothing "
+                                f"but wrote {len(stray)} matching file(s) directly to the repo "
+                                f"(e.g. {stray[0]}) — treating as soft signal, not waiting. "
+                                "Agents MUST write to staging only.",
+                            )
+                        continue
+                still_pending.append(a)
+            pending = still_pending
+            if not pending:
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(poll_interval)
+        return True
+    finally:
+        restore_session_repos()
 
 
 # ── Dependency-aware release loop (DAG sessions) ──────────────────
@@ -456,7 +667,29 @@ def run_dependency_aware(
     ``launch_fn`` defaults to :func:`launch_agent_window`; tests inject a stub to avoid
     opening real Terminal windows. Returns True when every agent is done, False on
     timeout or an unbreakable block (all remaining agents blocked by a failed dependency).
+
+    The repo(s) are isolated read-only before the first window opens and restored in a
+    ``finally`` once the loop ends (all done, timeout, or stall) — so the repo is writable
+    again for proofing and the atomic commit, and an exception in the loop never leaves it
+    locked. The atexit/signal handlers back this up on any abnormal exit.
     """
+    isolate_session_repos(session)
+    try:
+        return _run_dependency_aware(
+            session, launch_fn=launch_fn, poll_interval=poll_interval, timeout=timeout,
+        )
+    finally:
+        restore_session_repos()
+
+
+def _run_dependency_aware(
+    session: ConductorSession,
+    *,
+    launch_fn: Callable[[ConductorSession, AgentSpec], None] | None = None,
+    poll_interval: float = 1.0,
+    timeout: float | None = None,
+) -> bool:
+    """The release loop proper. Isolation is owned by :func:`run_dependency_aware`."""
     launch = launch_fn or launch_agent_window
     builder = DAGBuilder()
 
