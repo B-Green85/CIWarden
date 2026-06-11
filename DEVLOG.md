@@ -1050,7 +1050,115 @@ a20ad14752021a88e2676976
 
 ## June 10, 2026 — {title placeholder}
 
-<!-- NARRATIVE: Replace this block with session narrative -->
+# Sentinel v3 — First Multi-Agent Multi-Repo Build
+
+**Date:** June 9, 2026
+**Branch:** main
+**Repos:** sentinel + GolemLinux
+**Agents:** 8
+**Tests landed:** 196 passing
+**Merge token:** 595d6f3e15c7
+
+---
+
+## What This Session Was
+
+The first real test of the upgraded Conductor under production conditions. Eight agents across two repos, dependency ordering enforced by the new DAG, Sentinel v3 built from scratch in a single session.
+
+It did not go cleanly. It went honestly. Every problem that surfaced was real, caught before it became permanent, and resolved without losing any work. That is the system functioning as designed.
+
+---
+
+## The Good
+
+**Agent 8 saved the session.**
+
+By the time Agent 8 ran, the repo was in a half-merged state. Three agents had written to staging correctly. Three had written directly to the repo — outside the Conductor's control. Agent 8 landed with no `.done` files visible in staging, an incomplete repo that wouldn't compile, and a Conductor stuck in deadlock.
+
+It mapped the entire situation methodically. Read every staging directory. Read the repo. Cross-referenced what was present against what was specced. Built a clear task list. Then it did what none of the other agents did — it completed the integration that the rogue agents left unfinished. Copied keygen, transport, and audit chain from staging into the repo. Wired transport into sentinel-core. Integrated the audit chain. Created the missing Python package. Compiled the PyO3 extension. Ran all verification targets.
+
+196 tests passing when it signaled `.done`.
+
+**The DAG worked.** Agents 5 and 6 correctly waited for Agent 1 before launching. The dependency ordering logic that was built this morning worked on its first real multi-agent session this afternoon. The Conductor cued each section when it was their turn.
+
+**Agent 3 caught Agent 1's contract in real code.** Agent 3 read Agent 1's actual produced types from staging — not the spec — and integrated against the real interface. Same pattern as the Conductor session this morning. The agents are learning to verify against reality, not documentation.
+
+**Agent 6 discovered the GolemLinux audit chain was already chained.** Rather than overwrite verified FIPS-tested cryptographic primitives with a fresh implementation, it noted the no-op and moved on. That's the right call.
+
+**196 tests. 7 crates. One session.**
+
+---
+
+## The Bad
+
+**Three agents went rogue.**
+
+Agents 1, 4, and 5 wrote directly to `~/Projects/sentinel` instead of their staging directories. The Conductor's staging isolation is a convention enforced by the prompt, not a hard filesystem constraint. These agents ignored the convention and wrote to the repo.
+
+The consequences were real. Agent 8 launched expecting an empty repo and found half-merged v3 types. Agent 3 wrote transport code against `sentinel_types::ProcessIdentity` that didn't exist yet in the repo. The workspace didn't compile. Agent 8 had to do emergency integration work that was never in its scope.
+
+This is the most important v1.2 fix. The Conductor must enforce staging isolation at the filesystem level — set each agent's working directory to its staging dir, and make the repo path read-only during the session. Right now it is honor system. Honor system fails.
+
+**The Conductor deadlocked.**
+
+Agent 8 correctly stood down when its dependencies weren't in the repo. The Conductor was waiting for Agent 8's `.done`. Agent 8 was waiting for the repo to have the other agents' work. Classic deadlock — broken only by manually pointing Agent 8 at the staging directories.
+
+The root cause: Agent 8 checked the repo, not the staging directories. Its prompt didn't tell it to look in sibling staging dirs. Future agent prompts for final-stage agents need explicit instructions to check `../agent_00N/` staging output when repo state is incomplete.
+
+**The DAG parsing was incomplete.**
+
+Agents 2, 3, 4, 6, 7, and 8 all showed "no dependencies" in the dependency graph despite having clear `CONTRACTS_CONSUMED` declarations. Only Agents 5 and 6 were correctly parsed as waiting for Agent 1. The zero-padded ID resolution that Agent 1 built this morning apparently works for some patterns and not others under real session conditions. This needs a dedicated investigation.
+
+**The clipboard race is back.**
+
+The programmatic window launcher in the upgraded `distributor.py` didn't carry forward the serialized clipboard write logic from the old `launch_agents.sh`. Six terminal windows opened simultaneously, all overwriting the clipboard. Prompts had to be drag-and-dropped manually. Fixed in the moment but needs a proper fix in v1.2.
+
+**Wizard redundancy — fixed mid-session.**
+
+The wizard was asking repo per-agent (Enter x8) and redundantly asking for a path after a full path was already given. Fixed with a quick Claude Code session before the build started. The fix worked — wizard now asks once globally, overrides per-agent only when needed. But the fact that this friction existed at all in the first multi-repo session is worth noting.
+
+---
+
+## The Satisfactory
+
+**`sentinel-signals` was already broken before this session.** `detectors.rs` references `SignalType::Cascade` which doesn't exist in `sentinel-types`. Agent 6 flagged it, Agent 8 confirmed it, neither touched it. Pre-existing, out of scope, left for a dedicated fix. Good discipline.
+
+**The `SentinelError` struct-vs-enum conflict** was flagged by three separate agents independently — 4, 5, and 8. Nobody resolved it unilaterally. It's documented in `INTEGRATION_REPORT.md` for a deliberate fix rather than an agent making a solo call on a shared contract.
+
+**Agent 7 made the right calls on GolemLinux.** Replaced `todo!()` bodies with real kernel bookkeeping rather than panicking on reachable code paths. Passed through untracked processes silently to preserve Sentinel's invisibility guarantee. Both deviations from the spec were correct and documented.
+
+**The session recovered.** Despite rogue writes, a deadlocked Conductor, incomplete DAG parsing, and a half-merged repo — 196 tests are passing and Sentinel v3 is committed. Nothing was lost. The audit trail is intact.
+
+---
+
+## Open Items for v1.2
+
+1. **Staging isolation enforcement** — repo read-only during Conductor sessions, agent CWD set to staging dir. This is the most important fix.
+2. **Clipboard serialization** — restore the delay/serialization from `launch_agents.sh` in the new programmatic launcher.
+3. **DAG parsing gap** — zero-padded ID resolution not working for all `CONTRACTS_CONSUMED` patterns. Investigate and fix.
+4. **Agent 8 staging awareness** — final-stage agent prompts need explicit instruction to check sibling staging dirs when repo is incomplete.
+5. **`sentinel-signals` compile fix** — `SignalType::Cascade` missing from `sentinel-types`. Small fix, separate session.
+6. **`SentinelError` struct-vs-enum** — resolve the contract conflict across all crates. Documented in `INTEGRATION_REPORT.md`.
+7. **Commit message agent count** — Conductor counted staging agents only, missed repo-direct agents. Fix the count logic.
+
+---
+
+## What Sentinel v3 Delivered
+
+- `sentinel-types` — 7 new v3 types: `ProcessIdentity`, `SessionCredential`, `ChainedAuditEntry`, `InterceptionEvent`, `InterceptionDecision`, `DenyReason`, `SyscallId`
+- `sentinel-keygen` — new binary crate, P-256 keys via openssl, allowlist management, key rotation, verify command
+- `sentinel-core/transport` — `SentinelTransport` trait, `UnixTransport`, `PipeTransport`, `KernelTransport` stub
+- `sentinel-core/ebpf` — eBPF interception module, `SocketAuth`, `Allowlist`, `--oo` observer flag
+- `sentinel-core/audit` — cryptographic audit chain, NDJSON format, `sentinel-verify` binary
+- `sentinel-controls` — `SentinelCapability` trait, `Enforcer`, `Observer` (no-ops), `LegionnairePolicy`, five deployment profiles, `TelegramNotifier`
+- `sentinel-py` — v3 operator bindings: `ProcessIdentity`, `AuditEntry`, `verify_audit_chain`, `read_audit_chain`, `get_profile`, `is_observer_mode`
+- `GolemLinux/src/sentinel` — kernel subsystem upgraded: `enforcer.rs`, `observer.rs`, compile-time mutual exclusion, native interception layer
+
+---
+
+*Sentinel v3 — First Multi-Agent Multi-Repo Build*
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*
+*Session date: June 9, 2026*
 
 ---
 
