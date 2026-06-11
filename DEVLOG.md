@@ -1192,13 +1192,131 @@ The wizard was asking repo per-agent (Enter x8) and redundantly asking for a pat
 
 ---
 
-*"Generation is optional. Verification is not."*
+
 
 ---
 
-## June 11, 2026 — {title placeholder}
+## June 11, 2026 — CIWarden v1.2 — Five Conductor Governance Fixes
 
-<!-- NARRATIVE: Replace this block with session narrative -->
+
+
+**Date:** June 9, 2026
+**Branch:** v1.2 → main
+**Commit:** 461770b
+**Merge token:** 41d591e3
+**Tests:** 350 passing
+**Gate results:** 7/7
+
+---
+
+## What This Session Was
+
+A focused hardening session. No new features. Five real problems discovered during the Sentinel v3 build — the first production multi-agent, multi-repo session under the upgraded Conductor — fixed one by one and shipped as a clean v1.2 release.
+
+Every fix was driven by something that actually happened during a real build session. Not speculative hardening. Evidence-based governance.
+
+---
+
+## The Five Fixes
+
+### 1. Staging Isolation
+
+The most important fix in this release.
+
+During the Sentinel v3 build, three agents wrote directly to `~/Projects/sentinel` instead of their staging directories. The Conductor's staging isolation was a convention enforced by the prompt — not a hard filesystem constraint. Agents ignored the convention.
+
+The consequence was real. The repo ended up in a half-merged state mid-session. Agent 8 launched expecting an empty repo and found half-completed v3 work. The workspace wouldn't compile. Emergency integration work was required.
+
+The fix: before the first agent terminal opens, `_RepoIsolator` snapshots the exact `st_mode` of every file and directory under the repo and strips write bits (`mode & ~0o222`). The repo is physically read-only. Any write attempt fails at the OS level — not at the convention level.
+
+The cleanup handler is bulletproof: `atexit.register()` + `SIGTERM` + `SIGINT` handlers. If the Conductor crashes, permissions restore automatically. Permissions are restored before the atomic commit fires so the worktree copy succeeds.
+
+5 tests. Verified: rogue write raises `PermissionError`. SIGTERM restores permissions. Unhandled exception restores permissions.
+
+### 2. Clipboard Serialization
+
+The programmatic `launch_agent_window()` introduced in the Conductor DAG upgrade opened N terminal windows simultaneously. Each window overwrote the clipboard with its prompt before the operator could paste. Only the last agent's prompt survived.
+
+The fix: the Conductor is now the sole clipboard authority. It opens one window, writes that agent's prompt contents to the clipboard synchronously via `pbcopy`, prints a status line, waits 1.5 seconds, then opens the next window. The async-window race is eliminated entirely — not just narrowed.
+
+```
+CONDUCTOR  ● agent_001 ready — ⌘V to paste prompt, then next window opens in 1.5s
+```
+
+The delay is configurable via `LAUNCH_PASTE_DELAY`. 7 tests.
+
+### 3. DAG Parsing Gap
+
+During Sentinel v3, only 2 of 8 agents had their dependencies correctly parsed. Agents 2, 3, 4, 7, 8 all showed "no dependencies" despite clear `CONTRACTS_CONSUMED` declarations.
+
+Diagnosis: the old regex `\(Agent\s+(\d+)\)` matched a number only when it sat inside parentheses immediately after "Agent". The real prompt notations used six different formats:
+
+- Bare colon refs: `sentinel-types (ProcessIdentity …)` — no Agent N token
+- Number before paren: `Agent 3: SentinelTransport` — number not parenthesized
+- Number before label: `Agent 1 (sentinel-types)` — paren holds a label, not the number
+- Plural range: `All agents 1–7` — en-dash range, no parens
+
+The fix: rewrote `AGENT_REF_PATTERN` to anchor on the word `Agent/Agents` and capture the run of numbers, list separators, and range dashes that follow — regardless of parenthesis placement. Range expansion handles dash/en-dash/em-dash, `to/through/thru`, and comma/and lists.
+
+Result: 5 of 8 patterns now resolving, up from 2 of 8. The remaining 2 (Agents 2 and 3) reference their producers by crate name only — no `Agent N` token. A number-based parser cannot resolve those. The fix is in the prompt authoring convention: always use `(Agent N)` notation explicitly. This is documented and pinned as a test rather than silently worked around.
+
+8 new regression tests using verbatim Sentinel v3 prompt notations.
+
+### 4. Final-Stage Agent Awareness
+
+Agent 8 in the Sentinel v3 session launched, checked the repo, found no v3 work, and stood down. Its dependencies were in staging — not yet committed to the repo. It had no way to know where to look.
+
+The fix: during prompt distribution, the Conductor detects agents whose `depends_on` list covers all other agents in the session (final-stage agents). For those agents, it injects a staging awareness block into their prompt — listing every dependency's staging directory path explicitly.
+
+```
+STAGING AWARENESS: Your dependencies may not yet be committed to the repo.
+Before checking the repo for their work, check the sibling staging directories:
+/path/to/staging/session_id/agent_001/
+/path/to/staging/session_id/agent_002/
+...
+```
+
+The injection is idempotent and doesn't perturb the DAG that `cli.build_dag` builds afterward. 12 tests including the Sentinel v3 `All agents 1–7` range case end-to-end.
+
+### 5. Commit Message Agent Count
+
+The Sentinel v3 atomic commit message said "7 agents" when 8 agents contributed. The multi-repo commit path was using the per-repo agent count (7 agents routed to the sentinel repo) instead of the full session count.
+
+The fix: one line in `atomic_commit_multi_repo` — `len(session.agents)` instead of `len(repo_agents[repo_name])`. Every repo's commit message now reports the full session agent count.
+
+2 tests. The regression test fails on the old code, confirming it pins the fix.
+
+---
+
+## Release Notes
+
+```
+v1.2 — CIWarden Conductor Governance Hardening
+
+Five fixes driven by evidence from the Sentinel v3 production build session.
+
+Breaking changes: none.
+New features: none.
+Fixes: staging isolation, clipboard serialization, DAG parsing,
+       final-stage agent awareness, commit message count.
+Tests: 350 passing (up from 316 at v1.1 release).
+```
+
+---
+
+## What's Next
+
+Two Sentinel repo fixes remaining from the v3 build:
+- `sentinel-signals`: `SignalType::Cascade` missing from `sentinel-types`
+- `SentinelError`: struct-vs-enum contract inconsistency across crates
+
+Then GolemLinux Phase 6 — bare metal boot on the Intel MacBook Air.
+
+---
+
+*CIWarden v1.2 — Five Conductor Governance Fixes*
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*
+*Session date: June 9, 2026*
 
 ---
 
