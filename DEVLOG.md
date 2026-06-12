@@ -1476,3 +1476,103 @@ After Phase 7: the bare metal boot on the Intel MacBook Air. GolemLinux running 
 ---
 
 *"Generation is optional. Verification is not."*
+
+---
+
+## June 12, 2026 — Sentinel Integration into Gastown
+
+**Date:** June 11, 2026
+**Commits:** `c74dfc99`, `b68e3c73`
+**Repo:** `github.com/steveyegge/gastown`
+
+---
+
+## Background
+
+Gastown is a multi-agent workspace manager that coordinates parallel AI coding agents ("polecats") across git-worktree-based project containers ("rigs"). Its internal safety architecture is a three-tier userspace watchdog chain: a per-rig Witness, a cross-rig Deacon supervisor, and infrastructure Dogs dispatched for triage. All three tiers are Go processes operating in userspace.
+
+Sentinel is a Rust-based governance daemon that observes agent processes at the kernel layer via eBPF syscall interception. In its standalone deployment it runs outside the process space of the agents it governs. Agents have no awareness of its existence.
+
+The question motivating this session: can Sentinel be integrated into Gastown in a way that addresses a genuine capability gap without duplicating what Gastown already provides.
+
+---
+
+## The Capability Gap
+
+Gastown's Witness/Deacon/Dogs chain detects runaway or stuck polecats through behavioral observation — tmux session liveness, bead state progression, GUPP violations. Detection latency is measured in minutes. More critically, all three tiers are userspace Go processes subject to the same resource constraints as the agents they monitor. Under severe contention — OOM, fork bomb, disk exhaustion — the watchdog can be starved of CPU cycles alongside the colony it is supposed to halt.
+
+Sentinel's eBPF interception operates at the kernel layer and is not subject to this failure mode. Detection latency is measured in nanoseconds — the intercept fires before the syscall completes. Under any resource pressure that would degrade or kill the Witness, Sentinel remains operational.
+
+A secondary gap: Gastown's event logs record what the Witness observed. Sentinel's audit log records what agents actually did at the syscall level, cryptographically chained and tamper-evident. These are different classes of record.
+
+---
+
+## Design
+
+A source audit of Gastown identified a critical property of its ESTOP mechanism (`internal/estop/estop.go`): it is filesystem-based. `estop.Activate()` writes a file; `estop.IsActive()` checks for its presence. Any process with filesystem access can trigger a town-wide emergency stop.
+
+This observation determined the deployment mode. Sentinel's active enforcement capability — syscall blocking, SIGTERM, permission revocation — is unnecessary when a single file write halts the entire agent colony through Gastown's own machinery. Sentinel runs in observer mode (`--oo`) exclusively: intercept, audit, and write ESTOP on hard threshold crossing. No enforcement friction during normal operation.
+
+**Attachment point:** `internal/polecat/manager.go`, function `addWithOptionsLocked`. At the moment of polecat construction, Gastown has resolved the complete agent identity: name, rig, clone path, branch, assigned bead, and runtime binary path. This data is forwarded to Sentinel via Unix socket IPC (`RegisterPolecat`) before the function returns, pre-populating Sentinel's `ProcessIdentity` and `SessionCredential` registry before the agent's first syscall. A corresponding `DeregisterPolecat` call in `RemoveWithOptions` closes the registry entry on cleanup.
+
+The integration is fail-open throughout. If Sentinel is not running, all calls return nil. Gastown's behavior is unchanged. `SENTINEL_ENABLED=0` disables the integration entirely.
+
+---
+
+## Implementation
+
+A single Claude Fable 5 agent executed the integration under CIWarden governance. Three files were produced:
+
+- `internal/sentinel/sentinel.go` — Go client library. `RegisterPolecat`, `DeregisterPolecat`, `EstopActive`. No external dependencies. 100ms dial timeout. Fail-open on all code paths.
+- `internal/sentinel/sentinel_test.go` — 8 tests against a mock Unix socket server covering correct message structure, fail-open behavior when Sentinel is unavailable, no-op behavior when disabled, and ESTOP file detection.
+- `internal/polecat/manager.go` — three targeted edits: sentinel import, `RegisterPolecat` hook at the end of `addWithOptionsLocked`, `DeregisterPolecat` hook at the top of `RemoveWithOptions`.
+
+The agent verified against a throwaway repo copy before signaling `.done`. The Conductor enqueued a single atomic commit. All seven CIWarden gates passed.
+
+**Commit `c74dfc99`** — sentinel integration: three files, merge token issued.
+
+**Commit `b68e3c73`** — follow-up: `TestMain` added to `sentinel_test.go` to set `TMPDIR=/tmp` before test execution. On macOS, `t.TempDir()` under the default `/var/folders/...` TMPDIR produces paths that exceed the 104-character Unix socket limit, causing the four mock-socket tests to fail with `bind: invalid argument`. The fix was identified during the first agent run, confirmed clean by Fable 5 on the second run, and committed as a separate gated change.
+
+---
+
+## Finding
+
+The ESTOP observation is the architectural conclusion of this session. Sentinel's most powerful capability in isolation — active syscall interception with enforcement — becomes unnecessary when the target environment already has a clean, accessible emergency stop primitive. The integration reduces to its two durable contributions: earlier detection and a better audit record. Both are delivered by observer mode alone, with zero operational friction.
+
+---
+
+*Copyright © 2026 Brandon Green. Licensed under the Apache 2.0 License.*
+
+---
+
+### Commits This Session
+
+| SHA | Message | Gates | Total |
+|-----|---------|-------|-------|
+| `7aae268` | docs(devlog): GolemLinux Phase 6 Bare Metal Boot | ✓ 7/7 | 45767ms |
+| `93127ac` | chore: gitignore runtime artifacts — pycache, db, log, DS_Store | ✓ 7/7 | 45539ms |
+
+---
+
+### Gate Summary
+
+| Gate | Fastest | Slowest | Runs |
+|------|---------|---------|------|
+| lint | 66ms | 71ms | 2 |
+| typecheck | 1073ms | 1141ms | 2 |
+| security | 1128ms | 1247ms | 2 |
+| memory | 497ms | 533ms | 2 |
+| test | 12076ms | 12092ms | 2 |
+| stress | 30497ms | 30514ms | 2 |
+| build | 169ms | 202ms | 2 |
+
+---
+
+### Merge Tokens
+
+ac84ce715e1e6bea0dd31f7c
+a47dfbab0bdb12791565e838
+
+---
+
+*"Generation is optional. Verification is not."*
